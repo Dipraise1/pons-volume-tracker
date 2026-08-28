@@ -1,0 +1,15 @@
+# secrets / runtime
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
+*.log
+__pycache__/
+*.pyc
+.venv/
+
+# infra-specific deploy scripts (contain server IP / credentials)
+deploy/
+run-local.sh

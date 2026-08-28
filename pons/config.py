@@ -1,0 +1,90 @@
+"""Configuration, loaded from .env next to the project root."""
+from __future__ import annotations
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env() -> None:
+    env = ROOT / ".env"
+    if not env.exists():
+        return
+    for line in env.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, val = line.partition("=")
+        # strip trailing inline comments, but not '#' inside a quoted value
+        val = val.split("#", 1)[0].strip().strip('"').strip("'")
+        os.environ.setdefault(key.strip(), val)
+
+
+_load_env()
+
+
+def _f(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def _i(key: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(key, "") or default))
+    except ValueError:
+        return default
+
+
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+RPC_URL = os.environ.get("RPC_URL", "https://rpc.mainnet.chain.robinhood.com").strip()
+
+BACKFILL_HOURS = _f("BACKFILL_HOURS", 6)
+LAUNCH_BACKFILL_DAYS = _f("LAUNCH_BACKFILL_DAYS", 2)
+CONFIRMATIONS = _i("CONFIRMATIONS", 8)
+POLL_INTERVAL = _i("POLL_INTERVAL", 6)
+
+WHALE_ETH = _f("WHALE_ETH", 0.25)
+SPIKE_MULT = _f("SPIKE_MULT", 3.0)
+SPIKE_MIN_ETH = _f("SPIKE_MIN_ETH", 5.0)
+PRICE_MOVE_PCT = _f("PRICE_MOVE_PCT", 10.0)
+ALERT_COOLDOWN = _i("ALERT_COOLDOWN", 300)
+
+# Volume-burst alerts (the primary signal)
+VOL_WINDOW = _i("VOL_WINDOW", 180)              # seconds
+VOL_MIN_ETH = _f("VOL_MIN_ETH", 0.05)           # buy volume in that window
+MAX_ALERTS_PER_CYCLE = _i("MAX_ALERTS_PER_CYCLE", 25)
+
+# Follow-up quotes on coins we already called
+QUOTE_WINDOW = _i("QUOTE_WINDOW", 900)      # volume window for the quote
+QUOTE_MIN_ETH = _f("QUOTE_MIN_ETH", 0.05)   # min volume to re-quote
+QUOTE_COOLDOWN = _i("QUOTE_COOLDOWN", 900) # min seconds between quotes/coin
+
+# Price-surge alerts (any token)
+SURGE_PCT = _f("SURGE_PCT", 10.0)           # min % price jump in the window
+SURGE_WINDOW = _i("SURGE_WINDOW", 300)      # window (seconds) to measure over
+SURGE_MIN_ETH = _f("SURGE_MIN_ETH", 0.03)    # min volume, to suppress thin wicks
+SURGE_COOLDOWN = _i("SURGE_COOLDOWN", 600) # per token per 25% bucket
+
+# Momentum (early-pump acceleration) alerts
+ACCEL_MULT = _f("ACCEL_MULT", 3.0)          # window vol >= this x the prior window
+ACCEL_MIN_ETH = _f("ACCEL_MIN_ETH", 0.1)    # min current-window volume
+
+# Copy / followed-wallet alerts
+COPY_MIN_ETH = _f("COPY_MIN_ETH", 0.03)     # min buy size to alert
+AUTOFOLLOW_SMART = _i("AUTOFOLLOW_SMART", 0)   # wallet-copy alerts disabled
+
+# Broad "any token with volume" log feed
+LOG_MIN_ETH = _f("LOG_MIN_ETH", 0.02)          # min volume in window to log
+LOG_WINDOW = _i("LOG_WINDOW", 300)             # window seconds
+LOG_COOLDOWN = _i("LOG_COOLDOWN", 300)         # re-log a token at most this often
+LOG_MAX_PER_CYCLE = _i("LOG_MAX_PER_CYCLE", 25)
+
+# Admin ids (comma-separated Telegram user ids). Owner is always admin.
+ADMIN_IDS = [x.strip() for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+if CHAT_ID and CHAT_ID not in ADMIN_IDS:
+    ADMIN_IDS.append(CHAT_ID)
+
+DB_PATH = ROOT / "pons.db"
