@@ -58,7 +58,8 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
 
     win_lbl = _win_label(window_s)
     p_chg = enrich.price_change(db, pool, window_s)
-    p_1h = enrich.price_change(db, pool, 3600)
+    if p_chg is None:
+        p_chg = _since_launch_change(db, pool)   # brand-new token
     v_1h = enrich.volume_change(db, pool, 3600)
 
     hour = db.one("SELECT COUNT(*) n, COALESCE(SUM(ABS(weth_amt)),0) v, "
@@ -78,7 +79,8 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         f"USD:  {fmt.usd(price_usd)} ({_pct(p_chg)})",
         f"Dex:  Uniswap V3 · {C.launchpad_name(row['factory'])}",
         f"MC:   {fmt.usd(mcap)} | ⏳ {_age(row['launch_ts'])}",
-        f"Vol:  {fmt.usd(hour['v'] * eth_usd)} | 1H: {_pct(v_1h)} "
+        f"Vol:  {fmt.usd(hour['v'] * eth_usd)} | 1H: "
+        f"{_pct(v_1h) if v_1h is not None else 'new'} "
         f"🅑 {h_b} 🅢 {h_n - h_b}",
     ]
 
@@ -272,6 +274,16 @@ def _grid(outcomes: list[str], per_row: int = 10) -> str:
     rows = [" ├ " + "".join(dots[i:i + per_row])
             for i in range(0, len(dots), per_row)]
     return "\n".join(rows)
+
+
+def _since_launch_change(db: Db, pool: str):
+    first = db.one("SELECT price_weth FROM swaps WHERE pool=? AND price_weth>0 "
+                   "ORDER BY ts ASC, log_index ASC LIMIT 1", (pool,))
+    last = db.one("SELECT price_weth FROM swaps WHERE pool=? AND price_weth>0 "
+                  "ORDER BY ts DESC, log_index DESC LIMIT 1", (pool,))
+    if not first or not last or not first["price_weth"]:
+        return None
+    return (last["price_weth"] - first["price_weth"]) / first["price_weth"] * 100
 
 
 def _win_label(seconds: int) -> str:
