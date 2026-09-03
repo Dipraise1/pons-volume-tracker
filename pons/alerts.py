@@ -309,6 +309,67 @@ def volume_log_messages(db: Db, idx: Indexer) -> list[str]:
     return out
 
 
+def velocity_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
+    """High-signal buy-velocity alerts: >= VELOCITY_MIN_ETH bought in a short
+    window, intensity scaled up to VELOCITY_MAX_ETH."""
+    now = int(time.time())
+    win = cfg.VELOCITY_WINDOW
+    rows = db.q(
+        "SELECT s.pool, t.address, "
+        "  COALESCE(SUM(CASE WHEN s.is_buy=1 THEN ABS(s.weth_amt) END),0) buy_vol, "
+        "  COALESCE(SUM(ABS(s.weth_amt)),0) vol, "
+        "  COALESCE(SUM(s.is_buy),0) buys, COUNT(*) n "
+        "FROM swaps s JOIN tokens t ON t.pool = s.pool "
+        "WHERE s.ts >= ? AND t.address != ? "
+        "GROUP BY s.pool HAVING buy_vol >= ? ORDER BY buy_vol DESC LIMIT ?",
+        (now - win, C.PONS, cfg.VELOCITY_MIN_ETH, cfg.MAX_ALERTS_PER_CYCLE))
+    out = []
+    for r in rows:
+        if not db.alert_ready("velocity", r["address"], now, cfg.VELOCITY_COOLDOWN):
+            continue
+        db.mark_alert("velocity", r["address"], now)
+        rate = r["buy_vol"] / (win / 60)   # Ξ per minute
+        burst = {"weth": r["vol"], "buy_weth": r["buy_vol"],
+                 "buys": r["buys"], "swaps": r["n"]}
+        head = f"⚡ BUY VELOCITY {r['buy_vol']:.2f}Ξ/{win//60}m ({rate:.2f}Ξ/min)"
+        card = cards.volume_card(rpc, db, idx, r["address"], win, burst,
+                                 cfg.VELOCITY_MIN_ETH, headline=head)
+        if card:
+            out.append(card)
+            _record(db, idx, r["address"], "velocity")
+    return out
+
+
+def migration_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
+    """Follow-up on tokens that GRADUATED (migrated), once post-migration volume
+    builds — 'it bonded, here's how it's trading now'."""
+    now = int(time.time())
+    rows = db.q(
+        "SELECT DISTINCT t.address, t.symbol, t.pool FROM swaps s "
+        "JOIN tokens t ON t.pool = s.pool WHERE s.ts >= ? AND t.address != ?",
+        (now - 900, C.PONS))
+    out = []
+    for r in rows:
+        g = intel.graduation(rpc, r["address"])
+        if not g or not g.get("graduated"):
+            continue
+        # post-migration volume in the window
+        v = db.one("SELECT COALESCE(SUM(ABS(weth_amt)),0) vol, COUNT(*) n "
+                   "FROM swaps WHERE pool=? AND ts>=?", (r["pool"], now - 900))
+        if (v["vol"] or 0) < cfg.VELOCITY_MIN_ETH:
+            continue
+        if not db.alert_ready("migrated", r["address"], now, 3600):
+            continue
+        db.mark_alert("migrated", r["address"], now)
+        burst = {"weth": v["vol"], "buy_weth": v["vol"], "buys": 0, "swaps": v["n"]}
+        card = cards.volume_card(rpc, db, idx, r["address"], 900, burst,
+                                 cfg.VELOCITY_MIN_ETH,
+                                 headline="🎓 MIGRATED · post-migration volume")
+        if card:
+            out.append(card)
+    return out
+
+
 def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     if db.get_meta("global_paused", "0") == "1":
         return []
@@ -316,6 +377,8 @@ def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     msgs += burst_messages(rpc, db, idx)
     msgs += graduation_messages(rpc, db, idx)
     msgs += whale_messages(rpc, db, idx, tick.new_swaps)
+    msgs += velocity_messages(rpc, db, idx)
+    msgs += migration_messages(rpc, db, idx)
     msgs += surge_messages(rpc, db, idx)
     msgs += momentum_messages(rpc, db, idx)
     msgs += volume_log_messages(db, idx)

@@ -84,6 +84,15 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         f"🅑 {h_b} 🅢 {h_n - h_b}",
     ]
 
+    # --- bundlers -----------------------------------------------------
+    bnd = _safe(lambda: enrich.bundlers(rpc, db, token), db, {}, "bundlers")
+    if bnd and bnd.get("count"):
+        lines.append(
+            f"Bundle: {bnd['count']} wallets · {bnd['supply_pct']:.1f}% of supply")
+        lines.append(
+            f" └ now hold {bnd['held_pct']:.1f}% · "
+            f"{bnd['holding']} holding / {bnd['sold_out']} sold")
+
     # --- graduation ---------------------------------------------------
     grad = _safe(lambda: intel.graduation(rpc, token), db, {}, "graduation")
     if grad:

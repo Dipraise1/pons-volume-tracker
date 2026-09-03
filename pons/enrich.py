@@ -272,3 +272,49 @@ def volume_change(db: Db, pool: str, window_s: int) -> float | None:
     if not prev or not prev["v"]:
         return None
     return (cur["v"] - prev["v"]) / prev["v"] * 100
+
+
+def bundlers(rpc: Rpc, db: Db, token: str, blocks: int = 3) -> dict:
+    """Bundlers = wallets that bought in the launch block (or first few blocks) —
+    the coordinated open. Reports their share of supply and whether they've sold.
+
+    Buyers inside the launch block are almost always a bundle (one funded batch);
+    first_seen block == launch block is the tell.
+    """
+    row = db.one("SELECT pool,launch_block,decimals,total_supply,address "
+                 "FROM tokens WHERE address=?", (token.lower(),))
+    if not row or not row["pool"]:
+        return {}
+    lb = row["launch_block"] or 0
+    dec = row["decimals"] or 18
+    supply = row["total_supply"] or 0
+    # buyers within the first `blocks` blocks
+    rows = db.q(
+        "SELECT trader, MIN(block) fb, "
+        "  SUM(CASE WHEN is_buy=1 THEN token_amt ELSE 0 END) bought, "
+        "  SUM(CASE WHEN is_buy=0 THEN token_amt ELSE 0 END) sold "
+        "FROM swaps WHERE pool=? AND block<=? AND trader IS NOT NULL "
+        "GROUP BY trader", (row["pool"], lb + blocks))
+    bundle = [r for r in rows if r["fb"] is not None and r["fb"] <= lb + blocks
+              and (r["bought"] or 0) > 0]
+    if not bundle:
+        return {"count": 0, "supply_pct": 0.0, "holding": 0, "sold_out": 0,
+                "held_pct": 0.0}
+    # confirm current holdings on-chain
+    addrs = [r["trader"] for r in bundle]
+    calls = [("eth_call", [{"to": token.lower(),
+              "data": "0x70a08231" + "0" * 24 + a[2:]}, "latest"]) for a in addrs]
+    bals = [C.d_uint(x) / (10 ** dec) if x else 0.0 for x in rpc.batch(calls)]
+    held_total = holding = sold_out = 0
+    for r, bal in zip(bundle, bals):
+        if bal > (r["bought"] or 0) * 0.05:
+            holding += 1
+            held_total += bal
+        else:
+            sold_out += 1
+    return {
+        "count": len(bundle),
+        "supply_pct": (sum(r["bought"] for r in bundle) / supply * 100) if supply else 0.0,
+        "held_pct": (held_total / supply * 100) if supply else 0.0,
+        "holding": holding, "sold_out": sold_out,
+    }

@@ -52,6 +52,12 @@ SPIKE_MIN_ETH = _f("SPIKE_MIN_ETH", 5.0)
 PRICE_MOVE_PCT = _f("PRICE_MOVE_PCT", 10.0)
 ALERT_COOLDOWN = _i("ALERT_COOLDOWN", 300)
 
+# Buy-velocity alerts: high-signal buy pressure over a short window
+VELOCITY_MIN_ETH = _f("VELOCITY_MIN_ETH", 2.0)   # min buy volume to fire
+VELOCITY_MAX_ETH = _f("VELOCITY_MAX_ETH", 20.0)  # top of the intensity scale
+VELOCITY_WINDOW = _i("VELOCITY_WINDOW", 300)     # 5 min (the "1-5 min" window)
+VELOCITY_COOLDOWN = _i("VELOCITY_COOLDOWN", 600)
+
 # Volume-burst alerts (the primary signal)
 VOL_WINDOW = _i("VOL_WINDOW", 180)              # seconds
 VOL_MIN_ETH = _f("VOL_MIN_ETH", 0.05)           # buy volume in that window
