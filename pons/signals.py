@@ -85,10 +85,10 @@ def launch_grade(rpc, db: Db, token: str) -> dict:
     Reuses the same on-chain safety read used elsewhere, distilled to a single
     tag a trader can act on at a glance.
     """
-    from . import intel
+    from . import enrich, intel
     sf = intel.safety(rpc, db, token) or {}
     score = sf.get("score", 50)
-    early = intel.early_activity(db, token) or {}
+    early = enrich.early_activity(db, token) or {}
     snipers = early.get("same_block", 0)
 
     # sniper-heavy opens are a red flag even when the rest looks clean
