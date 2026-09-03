@@ -15,7 +15,7 @@ from . import chain as C
 from .db import Db
 from .rpc import Rpc
 
-CACHE_TTL = 120          # seconds
+CACHE_TTL = 360          # seconds
 TOP_N = 10
 VERIFY_N = 40            # candidates we re-check with balanceOf
 # Transfer-log scanning is exact but costs one getLogs page per 500k blocks.

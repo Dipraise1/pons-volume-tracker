@@ -21,6 +21,40 @@ from pons.telegram import Telegram
 
 stop = threading.Event()
 _last_wallet_rebuild = 0.0
+_last_precompute = 0.0
+
+
+_precompute_rpc = None
+
+
+def _precompute(idx, db):
+    """Warm holder/graduation/safety caches for the most active tokens.
+    Uses a dedicated RPC so it never slows the indexer; caches are module-level
+    so the warmed results are read by the bot's command handlers."""
+    from pons import enrich, intel, chain as C
+    import time as _t
+    global _precompute_rpc
+    if _precompute_rpc is None:
+        _precompute_rpc = Rpc(cfg.RPC_URL, min_interval=0.03)
+    prpc = _precompute_rpc
+    try:
+        rows = db.q(
+            "SELECT t.address FROM swaps s JOIN tokens t ON t.pool=s.pool "
+            "WHERE s.ts >= ? AND t.address != ? GROUP BY t.pool "
+            "ORDER BY SUM(ABS(s.weth_amt)) DESC LIMIT 30",
+            (int(_t.time()) - 3600, C.PONS))
+        for r in rows:
+            if stop.is_set():
+                return
+            tok = r["address"]
+            try:
+                enrich.holder_snapshot(prpc, db, tok)
+                intel.graduation(prpc, tok)
+                intel.safety(prpc, db, tok)
+            except Exception:
+                pass
+    except Exception as exc:
+        log(f"precompute failed: {exc}")
 
 
 def log(msg: str) -> None:
@@ -78,6 +112,13 @@ def index_loop(idx: Indexer, db: Db, tg: Telegram) -> None:
                 else:
                     log(f"{len(msgs)} alert(s) held — no subscribers yet")
             # Wallet rankings power the smart-money signal; refresh sparingly.
+            # pre-warm enrichment for the hottest tokens so on-demand
+            # commands (/token /safety /grad) reply from cache, not live RPC
+            global _last_precompute
+            if time.time() - _last_precompute > 180:
+                _last_precompute = time.time()
+                threading.Thread(target=_precompute, args=(idx, db),
+                                 daemon=True, name="precompute").start()
             global _last_wallet_rebuild
             if time.time() - _last_wallet_rebuild > 900:
                 _last_wallet_rebuild = time.time()

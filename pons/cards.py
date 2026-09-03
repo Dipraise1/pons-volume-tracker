@@ -10,6 +10,24 @@ from .rpc import Rpc
 
 DOT = {"hold": "🟢", "part": "🟡", "sold": "🔴"}
 
+from concurrent.futures import ThreadPoolExecutor as _TPE
+
+
+def _parallel(tasks: dict) -> dict:
+    """Run labeled callables concurrently (card enrichment is a dozen
+    independent RPC calls; sequentially they dominate reply latency)."""
+    out = {}
+    with _TPE(max_workers=min(8, len(tasks) or 1)) as ex:
+        futs = {ex.submit(fn): k for k, fn in tasks.items()}
+        for f, k in futs.items():
+            try:
+                out[k] = f.result()
+            except Exception as exc:
+                print(f"[cards] {k} failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+                out[k] = None
+    return out
+
 
 def _intensity(value: float, threshold: float, cap: int = 9) -> str:
     """More heat for bigger prints, like the reference channel's siren row."""
@@ -52,8 +70,8 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
                   "ORDER BY ts DESC, log_index DESC LIMIT 1", (pool,))
     price_weth = last["price_weth"] if last else 0.0
     price_usd = price_weth * eth_usd
-    supply = _safe(lambda: enrich.circulating(rpc, db, token), db, 0.0,
-                   "supply") or (row["total_supply"] or 0)
+    # supply resolved in the parallel block below; use total_supply as base
+    supply = row["total_supply"] or 0
     mcap = price_usd * supply
 
     win_lbl = _win_label(window_s)
@@ -84,8 +102,31 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         f"🅑 {h_b} 🅢 {h_n - h_b}",
     ]
 
+    # --- enrichment (run all independent RPC-heavy calls concurrently) --
+    R = _parallel({
+        "supply": lambda: enrich.circulating(rpc, db, token),
+        "bundlers": lambda: enrich.bundlers(rpc, db, token),
+        "graduation": lambda: intel.graduation(rpc, token),
+        "holders": lambda: enrich.holder_snapshot(rpc, db, token),
+        "safety": lambda: intel.safety(rpc, db, token),
+        "smart": lambda: wallets.smart_buyers(db, pool, window_s),
+        "deployer": lambda: intel.deployer_history(rpc, db, row["deployer"]),
+        "early": lambda: enrich.early_activity(db, token),
+        "outcomes": lambda: enrich.trader_outcomes(db, pool),
+    })
+
+    if R["supply"]:
+        supply = R["supply"]
+        mcap = price_usd * supply
+        # rewrite the MC line already appended with the burn-adjusted supply
+        for _i, _ln in enumerate(lines):
+            if _ln.startswith("MC:"):
+                lines[_i] = (f"MC:   {fmt.usd(mcap)} | ⏳ "
+                             f"{_age(row['launch_ts'])}")
+                break
+
     # --- bundlers -----------------------------------------------------
-    bnd = _safe(lambda: enrich.bundlers(rpc, db, token), db, {}, "bundlers")
+    bnd = R["bundlers"] or {}
     if bnd and bnd.get("count"):
         lines.append(
             f"Bundle: {bnd['count']} wallets · {bnd['supply_pct']:.1f}% of supply")
@@ -94,7 +135,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
             f"{bnd['holding']} holding / {bnd['sold_out']} sold")
 
     # --- graduation ---------------------------------------------------
-    grad = _safe(lambda: intel.graduation(rpc, token), db, {}, "graduation")
+    grad = R["graduation"] or {}
     if grad:
         if grad["graduated"]:
             lines.append("Grad: ✅ GRADUATED")
@@ -105,7 +146,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
                          f" · {grad['remaining']:.3f} Ξ to go")
 
     # --- holders ------------------------------------------------------
-    snap = _safe(lambda: enrich.holder_snapshot(rpc, db, token), db, {}, "holders")
+    snap = R["holders"] or {}
     if snap and snap.get("top"):
         lines.append(f"TH:   {snap['holders']:,} (total) | "
                      f"Top 10: {snap['top10_pct']:.1f}%")
@@ -113,7 +154,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         lines.append(f" └ {tops}")
 
     # --- safety ---------------------------------------------------------
-    sf = _safe(lambda: intel.safety(rpc, db, token), db, {}, "safety")
+    sf = R["safety"] or {}
     if sf:
         icon = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}[sf["grade"]]
         lines.append(f"Risk: {icon} {sf['grade']} ({sf['score']}/100)")
@@ -121,23 +162,21 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
             lines.append(f" ├ {reason}")
 
     # --- smart money ------------------------------------------------------
-    smart = _safe(lambda: wallets.smart_buyers(db, pool, window_s), db, [],
-                  "smart")
+    smart = R["smart"] or []
     if smart:
         total = sum(w["realized"] for w in smart)
         lines.append(f"🧠 Smart money: {len(smart)} wallet(s) bought")
         lines.append(f" └ combined realised PnL {fmt.eth(total)}")
 
     # --- deployer track record --------------------------------------------
-    hist = _safe(lambda: intel.deployer_history(rpc, db, row["deployer"]),
-                 db, {}, "deployer")
+    hist = R["deployer"] or {}
     if hist and hist.get("launches", 0) > 1:
         flag = "🔴" if hist["dead_pct"] >= 60 else "⚠️" if hist["dead_pct"] >= 30 else "✅"
         lines.append(f"Dev history: {flag} {hist['launches']} launches, "
                      f"{hist['dead']} dead ({hist['dead_pct']:.0f}%)")
 
     # --- early activity -------------------------------------------------
-    early = _safe(lambda: enrich.early_activity(db, token), db, {}, "early")
+    early = R["early"] or {}
     if early and early.get("buys"):
         lines.append("Early:")
         lines.append(f" ├ Snipers: {early['snipers']}")
@@ -145,7 +184,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         lines.append(f" └ Early inflow: {fmt.eth(early['early_eth'])}")
 
     # --- holder outcome grid ---------------------------------------------
-    outcomes = _safe(lambda: enrich.trader_outcomes(db, pool), db, [], "outcomes")
+    outcomes = R["outcomes"] or []
     if outcomes:
         lines.append(_grid(outcomes))
         hold = outcomes.count("hold")
@@ -364,3 +403,86 @@ def log_card(db: Db, idx: Indexer, row: dict, win: dict, window_s: int) -> str:
         f"{fmt.link('chart', C.explorer_token(row['address']))} · "
         f"{fmt.link('pool', C.explorer_addr(pool))}",
     ])
+
+
+# --- Robinhood stock tokens ----------------------------------------------
+def _eta(seconds: int) -> str:
+    if seconds <= 0:
+        return "now"
+    if seconds < 60:
+        return f"in {seconds}s"
+    if seconds < 3600:
+        return f"in {seconds//60}m{seconds%60:02d}s"
+    return f"in {seconds//3600}h{(seconds%3600)//60:02d}m"
+
+
+def stock_card(rpc: Rpc, info, holder: str | None = None,
+               holdings: dict | None = None,
+               blocked: bool | None = None) -> str:
+    """Everything about a stock token that balanceOf cannot tell you."""
+    from . import stock as S
+
+    head = f"<b>{fmt.esc(info.symbol or '?')}</b> — {fmt.esc(info.name or '')}"
+    lines = [f"✅ {head}", "<i>verified against the Robinhood registry</i>", ""]
+
+    drift = info.drift_pct
+    lines.append(f"Multiplier  <b>{info.multiplier:.9f}</b>")
+    if abs(drift) > 1e-9:
+        lines.append(f"Raw balances understate holdings by <b>{drift:+.4f}%</b>")
+    else:
+        lines.append("Raw balances are currently accurate (no drift yet)")
+
+    if info.supply_raw:
+        gap = info.supply_true - info.supply_raw
+        lines.append(f"Supply      {fmt.shares(info.supply_true)} true")
+        lines.append(f"            {fmt.shares(info.supply_raw)} raw "
+                     f"({gap:+,.4f} unreported)")
+
+    pend = info.pending
+    if pend:
+        lines += ["", "⚠️ <b>Corporate action pending</b>",
+                  f"Multiplier → <b>{pend['new_multiplier']:.9f}</b> "
+                  f"({pend['change_pct']:+.4f}%)",
+                  f"Effective <b>{_eta(pend['seconds_out'])}</b>"]
+
+    if info.frozen:
+        what = []
+        if info.token_paused:
+            what.append("transfers paused")
+        if info.oracle_paused:
+            what.append("oracle paused")
+        lines += ["", f"🔴 <b>{', '.join(what).capitalize()}</b>"]
+
+    if holder and holdings:
+        lines += ["", f"<b>{fmt.short(holder)}</b>",
+                  f"Reported  {fmt.shares(holdings['raw'])} {fmt.esc(info.symbol or '')}",
+                  f"Actual    <b>{fmt.shares(holdings['true'])}</b> "
+                  f"{fmt.esc(info.symbol or '')}"]
+        if holdings["understated"] > 0:
+            lines.append(f"Missing from wallets/explorers: "
+                         f"<b>+{fmt.shares(holdings['understated'])}</b>")
+        if blocked:
+            lines.append("🔴 <b>This wallet is blocklisted by the registry.</b>")
+
+    lines += ["", fmt.link("explorer", C.explorer_token(info.address))]
+    return "\n".join(lines)
+
+
+def counterfeit_card(address: str, meta: dict | None = None) -> str:
+    """A token that presents as a stock token but is not registry-controlled."""
+    name = (meta or {}).get("name") or ""
+    sym = (meta or {}).get("symbol") or ""
+    lines = ["🔴 <b>NOT an official Robinhood stock token</b>", ""]
+    if sym or name:
+        lines.append(f"Presents as <b>{fmt.esc(sym)}</b> — {fmt.esc(name)}")
+    lines += [
+        f"<code>{fmt.esc(address)}</code>",
+        "",
+        "It does not answer to the Robinhood stock registry, so it is not "
+        "backed by the underlying equity. Name, symbol and the "
+        "“• Robinhood Token” suffix can all be copied — registry control "
+        "cannot.",
+        "",
+        fmt.link("explorer", C.explorer_token(address)),
+    ]
+    return "\n".join(lines)
