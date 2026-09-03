@@ -78,6 +78,19 @@ POSITION_MANAGER = "0x73991a25c818bf1f1128deaab1492d45638de0d3"
 SWAP_ROUTER = "0xcaf681a66d020601342297493863e78c959e5cb2"
 LOCKER = "0x10f2756e373bab14999fdc9177587d51d30a1cf5"
 
+# --- Robinhood stock tokens ----------------------------------------------
+# Official tokenised equities are BeaconProxies over a single `Stock`
+# implementation, and every one of them reports the SAME registry address.
+# That makes the registry the only reliable authenticity check: a counterfeit
+# can copy the name, symbol and even the "• Robinhood Token" suffix, but it
+# cannot report this value without actually being registry-controlled.
+STOCK_REGISTRY = "0xe10b6f6b275de231345c20d14ab812db62151b00"
+STOCK_IMPL = "0xb35490d6f9163de4f80d88dc75c3516eb64c5ae2"
+# Value is carried by a multiplier, not by the raw balance: dividends and
+# splits move uiMultiplier() while balanceOf() stays put. Anything reading
+# balanceOf alone is reporting the wrong number by construction.
+STOCK_ONE = 10 ** 18
+
 # Launch parameters every Pons token is created with.
 GRADUATION_THRESHOLD = 4.2        # WETH accumulated before graduation
 POOL_FEE = 10000                  # 1%
@@ -104,6 +117,15 @@ TOPIC_V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcc
 TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 # Uniswap V3 PoolCreated(address indexed t0, address indexed t1, uint24 indexed fee, int24 tickSpacing, address pool)
 TOPIC_POOL_CREATED = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
+# Stock: UIMultiplierUpdated(uint256 old, uint256 new, uint256 effectiveAt)
+TOPIC_UI_MULTIPLIER = "0x2205df4534432b2f60654a3fdb48737ffdaf3e9edb1a498bd985bc026b15b055"
+# AccessControlsRegistry: wallet-level and chain-wide controls over every
+# stock token at once. Rare, but each one is materially a trader's problem.
+TOPIC_BLOCKED = "0x75e91ce73c1d3352d8dd3610443539cd33dfe13b1de8f8caae54ec26dd0dc9cb"
+TOPIC_UNBLOCKED = "0x5c272fb29e21b46870af1850afe89126704c55a7781cc100da3f733e15446c7d"
+TOPIC_PAUSED = "0x9e87fac88ff661f02d44f95383c817fece4bce600a3dab7a54406878b965e752"
+TOPIC_UNPAUSED = "0xa45f47fdea8a1efdd9029a5691c7f759c32b7c698632b563573e155625d16933"
+TOPIC_UPGRADED = "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b"
 
 # --- function selectors --------------------------------------------------
 SEL = {
@@ -119,6 +141,17 @@ SEL = {
     "graduationStatus": "0x98d652f1",
     "ownerOf": "0x6352211e",
     "balanceOf": "0x70a08231",
+    # Stock-token surface (see STOCK_REGISTRY above).
+    "stockRegistry": "0x50c09be3",   # ACCESS_CONTROLLED_REGISTRY()
+    "uiMultiplier": "0xa60bf13d",
+    "newUIMultiplier": "0xdc767007",
+    "effectiveAt": "0x97a4064f",
+    "tokenPaused": "0x86c75e74",
+    "oraclePaused": "0x7706ba52",
+    "balanceOfUI": "0x437a9958",
+    "totalSupplyUI": "0x9bea6429",
+    "isBlocked": "0xfbac3951",
+    "paused": "0x5c975abb",
 }
 
 
@@ -246,17 +279,35 @@ def pool_order(token: str, pair: str) -> bool:
 
 STOCK_SUFFIX = "• Robinhood Token"
 _extra_base: set[str] = set()   # runtime-grown: tokenized stocks used as quotes
+# Counterfeits copy the "• Robinhood Token" suffix exactly, so the name alone
+# cannot promote a token to quote-asset status. Anything confirmed against the
+# stock registry is added to _extra_base; anything confirmed NOT to answer to
+# it lands here and is never treated as a base again.
+_denied_base: set[str] = set()
 
 
 def mark_base(addr: str) -> None:
-    _extra_base.add(addr.lower())
+    a = addr.lower()
+    _denied_base.discard(a)
+    _extra_base.add(a)
+
+
+def deny_base(addr: str) -> None:
+    """Record that a stock-suffixed token is not registry-backed."""
+    a = addr.lower()
+    _extra_base.discard(a)
+    _denied_base.add(a)
 
 
 def is_base(addr: str, name: str | None = None) -> bool:
     a = addr.lower()
     if a in BASE_TOKENS or a in _extra_base:
         return True
+    if a in _denied_base:
+        return False
     if name and name.rstrip().endswith(STOCK_SUFFIX):
+        # Provisional: the suffix is a strong hint but a forgeable one. The
+        # stock module upgrades or revokes this once the registry answers.
         _extra_base.add(a)
         return True
     return False

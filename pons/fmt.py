@@ -51,6 +51,20 @@ def num(v: float) -> str:
     return f"{v:,.2f}"
 
 
+def shares(v: float) -> str:
+    """Share counts, at a precision that keeps raw and true balances distinct.
+
+    The whole point of showing both numbers is the gap between them, and a
+    dividend-sized gap disappears under the usual K/M abbreviation.
+    """
+    if v is None:
+        return "?"
+    a = abs(v)
+    if a and a < 0.0001:
+        return f"{v:,.8f}"
+    return f"{v:,.4f}".rstrip("0").rstrip(".") or "0"
+
+
 def ago(ts: int | None) -> str:
     if not ts:
         return "?"

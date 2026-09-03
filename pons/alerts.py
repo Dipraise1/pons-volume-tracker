@@ -3,7 +3,7 @@ pump.fun-style volume channels: a short window of concentrated buying."""
 from __future__ import annotations
 import time
 
-from . import cards, config as cfg, fmt, intel, signals, stats, wallets
+from . import cards, config as cfg, fmt, intel, signals, stats, stock, wallets
 from . import chain as C
 from .db import Db
 from .indexer import Indexer
@@ -370,6 +370,82 @@ def migration_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     return out
 
 
+def stock_messages(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
+    """Corporate actions and registry controls on tokenised equities.
+
+    These fire rarely but each one is unambiguous and time-critical: an
+    announced multiplier change leads its own effectiveAt by minutes, and a
+    registry pause freezes every stock token at once. Nothing else on the
+    chain surfaces them, so there is no dedupe window beyond the tx itself.
+    """
+    try:
+        events = stock.scan(rpc, tick.from_block, tick.to_block)
+    except Exception:
+        return []
+    out: list[str] = []
+    for ev in events:
+        if not db.alert_ready("stock", ev.tx + ev.kind, int(time.time()), FOREVER):
+            continue
+        msg = None
+        if ev.kind == "multiplier":
+            info = stock.verify(rpc, ev.token, use_cache=False)
+            if not info:
+                continue                       # not registry-controlled
+            stock.remember(db, info)
+            pct = (ev.new / ev.old - 1) * 100 if ev.old else 0.0
+            lead = ev.effective_at - int(time.time())
+            sym = fmt.esc(info.symbol or fmt.short(ev.token))
+            msg = "\n".join([
+                f"📈 <b>{sym} corporate action</b>",
+                "",
+                f"Multiplier {ev.old:.9f} → <b>{ev.new:.9f}</b>",
+                f"Holdings change <b>{pct:+.4f}%</b> with no transfer",
+                f"Effective {cards._eta(lead)}",
+                "",
+                "<i>Raw balances will not move — wallets and explorers "
+                "reading balanceOf will under-report from here.</i>",
+                "",
+                fmt.link("tx", C.explorer_tx(ev.tx)),
+            ])
+        elif ev.kind in ("paused", "unpaused"):
+            on = ev.kind == "paused"
+            msg = "\n".join([
+                ("🔴 <b>ALL Robinhood stock tokens FROZEN</b>" if on
+                 else "🟢 <b>Stock tokens unfrozen</b>"),
+                "",
+                ("The registry is paused: no stock token can be transferred "
+                 "until it is lifted." if on
+                 else "Registry unpaused — transfers have resumed."),
+                "",
+                fmt.link("tx", C.explorer_tx(ev.tx)),
+            ])
+        elif ev.kind in ("blocked", "unblocked"):
+            on = ev.kind == "blocked"
+            msg = "\n".join([
+                ("🔴 <b>Wallet blocklisted</b>" if on
+                 else "🟢 <b>Wallet unblocked</b>"),
+                "",
+                f"<code>{fmt.esc(ev.subject or '?')}</code>",
+                ("can no longer send or receive any Robinhood stock token."
+                 if on else "may hold Robinhood stock tokens again."),
+                "",
+                fmt.link("tx", C.explorer_tx(ev.tx)),
+            ])
+        elif ev.kind == "upgraded":
+            msg = "\n".join([
+                "⚠️ <b>Stock token implementation upgraded</b>",
+                "",
+                "Every Robinhood stock token now runs new code:",
+                f"<code>{fmt.esc(ev.subject or '?')}</code>",
+                "",
+                fmt.link("tx", C.explorer_tx(ev.tx)),
+            ])
+        if msg:
+            db.mark_alert("stock", ev.tx + ev.kind, int(time.time()))
+            out.append(msg)
+    return out
+
+
 def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     if db.get_meta("global_paused", "0") == "1":
         return []
@@ -383,6 +459,7 @@ def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     msgs += momentum_messages(rpc, db, idx)
     msgs += volume_log_messages(db, idx)
     msgs += quote_messages(rpc, db, idx)
+    msgs += stock_messages(rpc, db, idx, tick)
     # PONS-token spike/price alerts intentionally omitted — the feed is about
     # other launchpad tokens (launches, volume bursts, graduations), not PONS.
     return [m for m in msgs if m]

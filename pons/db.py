@@ -102,6 +102,18 @@ CREATE TABLE IF NOT EXISTS followed_wallets (
     added_ts  INTEGER
 );
 
+-- Official Robinhood stock tokens, confirmed against the registry.
+-- Cached because the registry answer is immutable per token; only the
+-- multiplier moves, and it moves on corporate actions.
+CREATE TABLE IF NOT EXISTS stock_tokens (
+    address    TEXT PRIMARY KEY,
+    symbol     TEXT,
+    name       TEXT,
+    multiplier REAL DEFAULT 1.0,
+    updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_stock_symbol ON stock_tokens(symbol);
+
 CREATE TABLE IF NOT EXISTS price_history (
     ts       INTEGER PRIMARY KEY,
     pons_usd REAL,

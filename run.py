@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from pons import alerts, config as cfg, fmt, stats, wallets
+from pons import alerts, config as cfg, fmt, stats, stock, wallets
 from pons.bot import Bot
 from pons.db import Db
 from pons.indexer import Indexer
@@ -89,6 +89,24 @@ def broadcast(tg: Telegram, db: Db, msgs: list[str]) -> int:
                 log(f"dropped subscriber {chat}: {desc}")
                 break
     return sent
+
+
+def seed_stock_tokens(idx: Indexer, db: Db) -> None:
+    """Populate the verified stock-token list once, off the startup path.
+
+    Discovery verifies every explorer candidate against the registry, which
+    takes ~a minute, so it runs in the background rather than delaying the
+    first index cycle. Alerts do not depend on it — the multiplier scan is
+    topic-matched and finds tokens the list has never seen.
+    """
+    try:
+        if db.one("SELECT 1 FROM stock_tokens LIMIT 1"):
+            return
+        res = stock.discover(idx.rpc, db)
+        log(f"stock tokens: {res['official']} verified, "
+            f"{res['counterfeit']} counterfeit of {res['candidates']} candidates")
+    except Exception as exc:
+        log(f"stock discovery failed: {type(exc).__name__}: {exc}")
 
 
 def index_loop(idx: Indexer, db: Db, tg: Telegram) -> None:
@@ -213,6 +231,9 @@ def main() -> int:
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+
+    threading.Thread(target=seed_stock_tokens, args=(bot_idx, db),
+                     daemon=True, name="stock-seed").start()
 
     threads = [threading.Thread(target=index_loop, args=(idx, db, tg),
                                 daemon=True, name="indexer")]

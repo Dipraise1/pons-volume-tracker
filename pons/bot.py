@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import chain as C
-from . import cards, fmt, intel, signals, stats, wallets
+from . import cards, fmt, intel, signals, stats, stock, wallets
 from .db import Db
 from .indexer import Indexer
 from .telegram import Telegram
@@ -27,6 +27,11 @@ HELP = """<b>Pons Volume Tracker</b> — Robinhood Chain
 /grad [24h] — tokens closest to graduating
 /launchpads [24h] — Pons vs Lemon vs others
 /safety &lt;symbol|addr&gt; — rug-risk breakdown
+
+<b>Stock tokens</b>
+/stocks — every verified Robinhood equity + drift
+/stock &lt;SYMBOL&gt; [wallet] — verify + true balance
+/blocked &lt;wallet&gt; — registry blocklist check
 
 <b>Signals</b>
 /trending [15m] — hottest by momentum
@@ -259,6 +264,80 @@ class Bot:
             lines += ["", f"Deployer: {hist['launches']} launches, "
                           f"{hist['dead']} dead ({hist['dead_pct']:.0f}%)"]
         return "\n".join(lines)
+
+    # --- Robinhood stock tokens ---------------------------------------
+    def cmd_stock(self, chat_id, args):
+        """Verify a tokenised equity and show what balanceOf hides."""
+        if not args:
+            return self.cmd_stocks(chat_id, args)
+        query = args[0]
+        addr = stock.by_query(self.db, query)
+        if not addr:
+            return (f"No stock token matching <code>{fmt.esc(query)}</code>. "
+                    "Run <code>/stockscan</code> to (re)build the list, or pass "
+                    "a contract address.")
+        info = stock.verify(self.idx.rpc, addr)
+        if not info:
+            meta = None
+            try:
+                meta = self.idx.token_meta([addr]).get(addr.lower())
+            except Exception:
+                pass
+            return cards.counterfeit_card(addr, meta)
+        stock.remember(self.db, info)
+
+        holder = None
+        held = blocked = None
+        if len(args) > 1 and args[1].startswith("0x") and len(args[1]) == 42:
+            holder = args[1]
+            held = stock.holdings(self.idx.rpc, addr, holder)
+            blocked = stock.wallet_blocked(self.idx.rpc, holder)
+        return cards.stock_card(self.idx.rpc, info, holder, held, blocked)
+
+    def cmd_stocks(self, chat_id, args):
+        """Every official stock token, worst multiplier drift first."""
+        rows = stock.known(self.db)
+        if not rows:
+            return ("No stock tokens cached yet — run <code>/stockscan</code> "
+                    "to discover and verify them.")
+        drifted = [r for r in rows if abs((r["multiplier"] or 1.0) - 1.0) > 1e-9]
+        drifted.sort(key=lambda r: -abs(r["multiplier"] - 1.0))
+        lines = [f"<b>Robinhood stock tokens</b> — {len(rows)} verified", ""]
+        if drifted:
+            lines.append("<b>Raw balances already wrong</b>")
+            for r in drifted[:15]:
+                lines.append(f"  {fmt.esc(r['symbol'] or '?'):<6} "
+                             f"{(r['multiplier']-1)*100:+.4f}%")
+            lines.append("")
+        lines.append(f"{len(rows)-len(drifted)} still at 1.000000000")
+        paused = stock.registry_paused(self.idx.rpc)
+        if paused:
+            lines += ["", "🔴 <b>Registry is PAUSED — all stock tokens frozen.</b>"]
+        lines += ["", "<code>/stock SYMBOL [wallet]</code> for one token"]
+        return "\n".join(lines)
+
+    def cmd_stockscan(self, chat_id, args, user_id=None):
+        """Rebuild the verified stock-token list from the explorer index."""
+        if not self._is_admin(user_id, chat_id):
+            return "Admins only."
+        res = stock.discover(self.idx.rpc, self.db)
+        return ("<b>Stock token scan</b>\n"
+                f"candidates   {res['candidates']}\n"
+                f"official     {res['official']}\n"
+                f"counterfeit  {res['counterfeit']}")
+
+    def cmd_blocked(self, chat_id, args):
+        """Is a wallet blocklisted from holding stock tokens?"""
+        if not args or not args[0].startswith("0x"):
+            return "Usage: <code>/blocked 0xwallet</code>"
+        w = args[0]
+        res = stock.wallet_blocked(self.idx.rpc, w)
+        if res is None:
+            return "Could not read the registry."
+        if res:
+            return (f"🔴 <b>{fmt.short(w)}</b> is <b>blocklisted</b> — it cannot "
+                    "send or receive Robinhood stock tokens.")
+        return f"🟢 <b>{fmt.short(w)}</b> is not blocklisted."
 
     def cmd_smart(self, chat_id, args):
         top = wallets.smart_money(self.db, 10)   # background loop keeps this fresh
@@ -589,6 +668,8 @@ class Bot:
         "mute": cmd_mute, "unmute": cmd_unmute, "stop": cmd_stop,
         "grad": cmd_grad, "graduation": cmd_grad, "safety": cmd_safety,
         "launchpads": cmd_launchpads, "pads": cmd_launchpads,
+        "stock": cmd_stock, "stocks": cmd_stocks, "equities": cmd_stocks,
+        "stockscan": cmd_stockscan, "blocked": cmd_blocked,
         "smart": cmd_smart, "wallet": cmd_wallet, "calls": cmd_calls,
         "quote": cmd_quote, "q": cmd_quote,
         "trending": cmd_trending, "hot": cmd_trending,

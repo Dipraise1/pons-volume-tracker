@@ -18,6 +18,7 @@ is re-verified on-chain with `balanceOf`.
 - 🐋 **Whale** trades
 - 🚀 **New launches** with an instant 🟢 SAFE / 🟡 RISKY / 🔴 AVOID grade
 - 📈 **Called-coin quotes** — re-quote a coin we flagged when it moves, with PnL since the call
+- 🏛 **Stock-token corporate actions** — dividends/splits, registry freezes, wallet blocklistings
 
 **Per-token intelligence**
 - Graduation %, rug-safety score (LP lock, dev holdings, holder concentration, pool depth)
@@ -38,10 +39,39 @@ is re-verified on-chain with `balanceOf`.
 | `/smart` · `/wallet <addr>` | profitable-wallet ranking |
 | `/calls` | the bot's own call performance |
 | `/price` · `/token <coin>` · `/chain` | market data |
+| `/stocks` | every verified Robinhood equity + multiplier drift |
+| `/stock <SYMBOL> [wallet]` | verify a stock token + true balance |
+| `/blocked <wallet>` | registry blocklist check |
 | `/admin` | admin controls (group owners) |
 
 **Admin / group controls** — `/setvol`, `/setsurge`, `/setlog`,
-`/broadcast`, `/subs`, `/pauseall`, `/resumeall`, `/thresholds`.
+`/broadcast`, `/subs`, `/pauseall`, `/resumeall`, `/thresholds`,
+`/stockscan` (rebuild the verified stock-token list).
+
+## Robinhood stock tokens
+
+Tokenised equities on this chain do not behave like launchpad tokens, and the
+difference is invisible to ordinary ERC-20 tooling.
+
+**Value moves through a multiplier, not the balance.** A dividend or split
+calls `updateMultiplier()`; `balanceOf` never changes. Anything reading
+`balanceOf` alone under-reports holdings, and the error compounds with each
+corporate action. `/stock` reports `balanceOfUI` — the true holding — beside
+the raw number.
+
+**Authenticity cannot be judged by name.** Counterfeits copy the symbol, the
+company name, and the “• Robinhood Token” suffix exactly. The one thing they
+cannot forge is `ACCESS_CONTROLLED_REGISTRY()`, which every official token
+answers with the same registry address, so that is the only check used. This
+also hardens pool pricing: a fake stock token can no longer be promoted to a
+quote asset on the strength of its name.
+
+**The tokens are administrable.** One registry can blocklist a wallet or pause
+every stock token at once, and the beacon behind them can be upgraded under all
+of them simultaneously. Each of those emits an event, and each is alerted on.
+
+Corporate actions are announced on-chain only minutes before they take effect,
+which is why this sits in the alert path rather than a daily digest.
 
 ## How launchpads are detected
 
