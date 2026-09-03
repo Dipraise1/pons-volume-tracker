@@ -17,6 +17,9 @@ MAX_POOLS = 600
 # Hydrating a token costs 4 eth_calls. Pons has ~250k lifetime launches, so an
 # unbounded historical backfill would mean ~1M calls. Cap per sync and say so.
 MAX_NEW_TOKENS = 400
+# On discovery, backfill a pool's swap history this far back (blocks) so it
+# has immediate volume/holders instead of waiting for forward trades.
+BACKFILL_POOL_BLOCKS = 300_000   # ~8h at ~101ms
 
 FALLBACK_BLOCK_TIME = 0.101   # measured: Blockscout reports ~101ms
 
@@ -243,7 +246,37 @@ class Indexer:
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
             print(f"[indexer] sync_pools registered {len(rows)} token(s) "
                   f"from {len(pcs)} new pools", flush=True)
+            self._backfill_pools(fresh)
         return fresh
+
+    def _backfill_pools(self, tokens: list[str]) -> None:
+        """Index recent swap history for freshly-discovered tokens' pools."""
+        if not tokens:
+            return
+        marks = ",".join("?" * len(tokens))
+        rows = self.db.q(
+            f"SELECT address,symbol,decimals,pool,pair_is_token0,pair_token,"
+            f"launch_block FROM tokens WHERE address IN ({marks})", tuple(tokens))
+        if not rows:
+            return
+        head = self.rpc.block_number()
+        pools = {}
+        lo = head
+        for r in rows:
+            if not r["pool"]:
+                continue
+            pools[r["pool"].lower()] = {
+                "token": r["address"], "symbol": r["symbol"],
+                "decimals": r["decimals"], "pair_is_token0": bool(r["pair_is_token0"]),
+                "pair_token": (r["pair_token"] or C.WETH).lower()}
+            lo = min(lo, max(r["launch_block"] or head, head - BACKFILL_POOL_BLOCKS))
+        if pools:
+            try:
+                n = self._store_swaps(pools, lo, head, window=8000)
+                print(f"[indexer] backfilled {len(n)} swaps for "
+                      f"{len(pools)} new pools", flush=True)
+            except Exception as exc:
+                print(f"[indexer] pool backfill failed: {exc}", flush=True)
 
     # --- pools we care about --------------------------------------------
     def active_pools(self) -> dict[str, dict]:
@@ -270,6 +303,10 @@ class Indexer:
         pools = self.active_pools()
         if not pools:
             return []
+        return self._store_swaps(pools, from_block, to_block)
+
+    def _store_swaps(self, pools: dict, from_block: int, to_block: int,
+                     window: int = 20_000) -> list[dict]:
         addrs = list(pools)
         logs: list[dict] = []
         for i in range(0, len(addrs), ADDR_CHUNK):
@@ -277,7 +314,7 @@ class Indexer:
                 from_block, to_block,
                 topics=[C.TOPIC_V3_SWAP],
                 addresses=addrs[i:i + ADDR_CHUNK],
-                window=20_000,
+                window=window,
             ))
         out, rows = [], []
         for log in logs:
