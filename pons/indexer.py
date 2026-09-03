@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 from . import chain as C
+from . import v4 as _v4
 from .db import Db
 from .rpc import Rpc
 
@@ -427,8 +428,23 @@ class Indexer:
                         if not (1e-12 < ppe < 1e6):   # reject absurd prices
                             continue
                         return ppe
+            # Uniswap V4 fallback: many quote tokens (WEALD, QVR, EARN) only
+            # have V4 pools, pairing against native ETH.
+            try:
+                head = self.rpc.block_number()
+                usd = _v4.price_usd(self.rpc, a, eu, self._dec_of,
+                                    max(0, head - 6_000_000), head)
+                if usd and eu:
+                    return usd / eu
+            except Exception as exc:
+                print(f"[indexer] v4 price {a[:10]} failed: {exc}", flush=True)
             return None
         return self._cached(f"ppe:{a}", _resolve)
+
+    def _dec_of(self, token: str) -> int:
+        if token.lower() == _v4.NATIVE_ETH:
+            return 18
+        return self.pair_decimals(token)
 
     def pons_per_weth(self) -> float:
         return self._cached("ppw", self._pons_per_weth_live)
