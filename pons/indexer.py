@@ -177,23 +177,92 @@ class Indexer:
              launch_block, self.clock.ts_of(launch_block), 0.0, "",
              meta.get("total_supply", 0) / 1e18, 1))
 
+    def sync_pools(self, from_block: int, to_block: int) -> list:
+        """Universal discovery: register ANY tradeable token that gets a V3-style
+        pool, from every DEX factory — not just those that emit TokenLaunched.
+        Tokens already registered (e.g. via a launch event) are left untouched."""
+        logs = self.rpc.get_logs_windowed(
+            from_block, to_block, topics=[C.TOPIC_POOL_CREATED], window=4000)
+        if not logs:
+            return []
+        pcs = [C.decode_pool_created(l) for l in logs]
+        known_pools = {r["pool"].lower() for r in
+                       self.db.q("SELECT pool FROM tokens WHERE pool IS NOT NULL")}
+        known_tokens = {r["address"] for r in self.db.q("SELECT address FROM tokens")}
+        pcs = [pc for pc in pcs if pc.pool and pc.pool not in known_pools]
+        if not pcs:
+            return []
+        # hydrate metadata for both sides so we can classify base vs tradeable
+        sides = {t for pc in pcs for t in (pc.token0, pc.token1)}
+        meta = self.token_meta(list(sides))
+
+        def base(a):
+            m = meta.get(a, {})
+            return C.is_base(a, m.get("name"))
+        def valid(a):
+            m = meta.get(a, {})
+            d = m.get("decimals", 18)
+            return (m.get("symbol") and m["symbol"] != "???"
+                    and m.get("total_supply", 0) > 0 and 0 <= d <= 18)
+
+        candidates = []   # (token, pair, pc)
+        for pc in pcs:
+            b0, b1 = base(pc.token0), base(pc.token1)
+            if b0 and b1:
+                continue                         # quote/quote pool
+            elif b0 and not b1:
+                candidates.append((pc.token1, pc.token0, pc))
+            elif b1 and not b0:
+                candidates.append((pc.token0, pc.token1, pc))
+            else:                                # meme×meme: index both
+                candidates.append((pc.token0, pc.token1, pc))
+                candidates.append((pc.token1, pc.token0, pc))
+
+        rows, fresh = [], []
+        seen = set()
+        for token, pair, pc in candidates:
+            if token in known_tokens or token in seen or not valid(token):
+                continue
+            seen.add(token)
+            m = meta.get(token, {})
+            dec = m.get("decimals", 18)
+            rows.append((
+                token, m.get("symbol", "???"), m.get("name", ""), dec,
+                pc.pool, pair, int(C.pool_order(token, pair)),
+                None, pc.dex_factory, pc.block, self.clock.ts_of(pc.block),
+                0.0, pc.tx, m.get("total_supply", 0) / (10 ** dec), 0,
+            ))
+            fresh.append(token)
+            if len(rows) >= MAX_NEW_TOKENS:
+                break
+        if rows:
+            self.db.many(
+                "INSERT OR IGNORE INTO tokens(address,symbol,name,decimals,pool,"
+                "pair_token,pair_is_token0,deployer,factory,launch_block,launch_ts,"
+                "initial_buy,tx,total_supply,is_pons) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            print(f"[indexer] sync_pools registered {len(rows)} token(s) "
+                  f"from {len(pcs)} new pools", flush=True)
+        return fresh
+
     # --- pools we care about --------------------------------------------
     def active_pools(self) -> dict[str, dict]:
         cutoff = int(time.time()) - ACTIVE_DAYS * 86400
         rows = self.db.q(
-            "SELECT address,symbol,decimals,pool,pair_is_token0 FROM tokens "
-            "WHERE pool IS NOT NULL AND launch_ts >= ? "
+            "SELECT address,symbol,decimals,pool,pair_is_token0,pair_token "
+            "FROM tokens WHERE pool IS NOT NULL AND launch_ts >= ? "
             "ORDER BY launch_block DESC LIMIT ?", (cutoff, MAX_POOLS))
         pools = {
             r["pool"].lower(): {
                 "token": r["address"], "symbol": r["symbol"],
                 "decimals": r["decimals"], "pair_is_token0": bool(r["pair_is_token0"]),
+                "pair_token": (r["pair_token"] or C.WETH).lower(),
             } for r in rows
         }
-        # PONS itself: always tracked, both fee tiers, WETH is token0 in both.
         for p in C.PONS_POOLS:
             pools.setdefault(p, {"token": C.PONS, "symbol": "PONS",
-                                 "decimals": 18, "pair_is_token0": True})
+                                 "decimals": 18, "pair_is_token0": True,
+                                 "pair_token": C.WETH})
         return pools
 
     # --- swaps ----------------------------------------------------------
@@ -216,22 +285,22 @@ class Indexer:
             info = pools.get(s.pool)
             if not info:
                 continue
+            pdec = self.pair_decimals(info["pair_token"])
+            ppe = self.pair_price_eth(info["pair_token"])
             if info["pair_is_token0"]:
-                weth_raw, token_raw = s.amount0, s.amount1
+                pair_raw, token_raw = s.amount0, s.amount1
+                p_in_pair = (1.0 / C.sqrt_to_price(s.sqrt_price, pdec,
+                             info["decimals"])) if s.sqrt_price else 0.0
             else:
-                weth_raw, token_raw = s.amount1, s.amount0
-            weth = weth_raw / 1e18
+                pair_raw, token_raw = s.amount1, s.amount0
+                p_in_pair = C.sqrt_to_price(s.sqrt_price, info["decimals"], pdec)
+            pair_amt = pair_raw / (10 ** pdec)
+            # ETH-equivalent value; unpriceable pairs are counted, not valued
+            weth = pair_amt * ppe if ppe is not None else 0.0
+            price = p_in_pair * ppe if ppe is not None else 0.0
             tok = token_raw / (10 ** info["decimals"])
-            is_buy = weth > 0          # pool receives WETH => trader bought
+            is_buy = pair_raw > 0      # pool receives pair => trader bought
             ts = self.clock.ts_of(s.block)
-            # sqrtPriceX96 is post-swap price of token1 in token0 terms;
-            # invert when the pair token sorts first so we always store
-            # "WETH per 1 token".
-            raw = C.sqrt_to_price(s.sqrt_price, 18, info["decimals"])
-            if info["pair_is_token0"]:
-                price = 1 / raw if raw else 0.0
-            else:
-                price = C.sqrt_to_price(s.sqrt_price, info["decimals"], 18)
             trader = s.recipient or s.sender
             rows.append((s.tx, s.log_index, s.pool, s.block, ts,
                          weth, tok, int(is_buy), price, trader))
@@ -264,6 +333,65 @@ class Indexer:
 
     def eth_usd(self) -> float:
         return self._cached("eth_usd", self._eth_usd_live)
+
+    _BASE_DEC = {C.WETH: 18, C.USDG: 6}
+
+    def pair_decimals(self, pair_token: str) -> int:
+        a = (pair_token or C.WETH).lower()
+        if a in self._BASE_DEC:
+            return self._BASE_DEC[a]
+        return self.token_meta([a]).get(a, {}).get("decimals", 18)
+
+    def pair_price_eth(self, pair_token: str):
+        """ETH value of ONE unit of the pair/quote token. WETH=1; USDG≈1/eth;
+        others priced transitively via their own WETH (then USDG) pool. Returns
+        None when a token can't be priced (its swaps are then counted, not valued)."""
+        a = (pair_token or C.WETH).lower()
+        if a == C.WETH:
+            return 1.0
+        def _resolve():
+            eu = self.eth_usd() or 0.0
+            if a == C.USDG:
+                return (1.0 / eu) if eu else None
+            # transitive: find a WETH pool for this token, read its price
+            for base, conv in ((C.WETH, 1.0), (C.USDG, (1.0 / eu) if eu else None)):
+                if conv is None:
+                    continue
+                for fac in ("0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+                            "0xe51960f1b45f1c9fb6d166e6a884f866fc70433b"):
+                    for fee in (10000, 3000, 500, 100):
+                        try:
+                            raw = self.rpc.call("eth_call", [{"to": fac,
+                                "data": "0x1698ee82" + "0"*24 + a[2:] + "0"*24
+                                        + base[2:] + f"{fee:064x}"}, "latest"])
+                        except Exception:
+                            continue
+                        pool = C.d_addr(C.words(raw)[0]) if raw and raw != "0x" else ""
+                        if not pool or pool == "0x" + "0"*40:
+                            continue
+                        try:
+                            slot = self.rpc.call("eth_call", [{"to": pool,
+                                "data": C.SEL["slot0"]}, "latest"])
+                            sqrt = C.d_uint(C.words(slot)[0])
+                        except Exception:
+                            continue
+                        if not sqrt:
+                            continue
+                        bdec = self._BASE_DEC.get(base, 18)
+                        tdec = self.pair_decimals(a)
+                        base_p = C.sqrt_to_price(sqrt, bdec, tdec)
+                        if not base_p:
+                            continue
+                        if base.lower() < a:   # base is token0
+                            p_in_base = 1.0 / base_p
+                        else:
+                            p_in_base = base_p
+                        ppe = p_in_base * conv
+                        if not (1e-12 < ppe < 1e6):   # reject absurd prices
+                            continue
+                        return ppe
+            return None
+        return self._cached(f"ppe:{a}", _resolve)
 
     def pons_per_weth(self) -> float:
         return self._cached("ppw", self._pons_per_weth_live)
@@ -323,6 +451,7 @@ class Indexer:
             return TickResult([], [], start, head)
 
         launches = self.sync_launches(start, head)
+        self.sync_pools(start, head)      # catch non-launch-event tokens too
         swaps = self.sync_swaps(start, head)
 
         self.db.set_meta("last_block", head)

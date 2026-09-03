@@ -11,7 +11,9 @@ EXPLORER = "https://robinhoodchain.blockscout.com"
 
 # --- core tokens ---------------------------------------------------------
 WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
-USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"   # 6 decimals
+USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"   # 6 decimals, ~$1 (Global Dollar)
+WEALD = "0xf0d4453a74581b4fa074a062b684cf120f875722"  # a recurring quote asset
+QVR = "0xf130c9630efa5fd5f660c90e71aaada344ff8d2b"    # Quiver, recurring quote
 PONS = "0x39dbed3a2bd333467115de45665cc57f813c4571"
 DEAD = "0x000000000000000000000000000000000000dead"
 
@@ -42,13 +44,34 @@ def launchpad_name(factory: str) -> str:
     if not factory:
         return "?"
     f = factory.lower()
-    return LAUNCHPADS.get(f, f"{f[:6]}…{f[-4:]}")
+    if f in LAUNCHPADS:
+        return LAUNCHPADS[f]
+    if f in V3_FACTORIES:            # pool-discovered token: show the DEX venue
+        return V3_FACTORIES[f]
+    return f"{f[:6]}…{f[-4:]}"
 
 # Earliest block worth scanning: V1 factory deployment.
 GENESIS_BLOCK = 8_991_118
 
 # --- venues --------------------------------------------------------------
 UNIV3_FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+# Every DEX factory on the chain that emits Uniswap-V3-style PoolCreated.
+# Indexing filters by the PoolCreated topic only (no address filter), so this
+# list is informational / for naming.
+V3_FACTORIES = {
+    "0x1f7d7550b1b028f7571e69a784071f0205fd2efa": "Uniswap V3",
+    "0xe51960f1b45f1c9fb6d166e6a884f866fc70433b": "Uniswap V3",
+    "0xe0c4ceb92d08ca985bb70fe0a22feb121a9854a8": "Ramses",
+    "0xece6ecd61177336ea6fb9b17937ac439d85ee20b": "CL",
+    "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865": "Pancake V3",
+    "0xd3504c3a32467e5e3c988aaf500dd689285c587e": "LaunchFactory",
+}
+# Quote/base assets: the non-tradeable side of a pool. A pool between two of
+# these is a pure quote pair and is skipped.
+BASE_TOKENS = {WETH, USDG, WEALD, QVR}
+# USD value of one unit of each base (for cross-pair volume normalisation).
+# WETH resolves live via the oracle; USDG is a dollar; others price transitively.
+BASE_USD_STATIC = {USDG: 1.0}
 UNIV4_POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
 # From the live factory's DexConfig(0) / LaunchConfig(0).
 POSITION_MANAGER = "0x73991a25c818bf1f1128deaab1492d45638de0d3"
@@ -79,6 +102,8 @@ TOPIC_TOKEN_LAUNCHED = "0xdb51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f9777
 TOPIC_V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 # Transfer(address,address,uint256)
 TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# Uniswap V3 PoolCreated(address indexed t0, address indexed t1, uint24 indexed fee, int24 tickSpacing, address pool)
+TOPIC_POOL_CREATED = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
 
 # --- function selectors --------------------------------------------------
 SEL = {
@@ -217,6 +242,49 @@ def sqrt_to_price(sqrt_price: int, dec0: int, dec1: int) -> float:
 def pool_order(token: str, pair: str) -> bool:
     """Uniswap sorts by address. Returns True if `pair` is token0."""
     return pair.lower() < token.lower()
+
+
+STOCK_SUFFIX = "• Robinhood Token"
+_extra_base: set[str] = set()   # runtime-grown: tokenized stocks used as quotes
+
+
+def mark_base(addr: str) -> None:
+    _extra_base.add(addr.lower())
+
+
+def is_base(addr: str, name: str | None = None) -> bool:
+    a = addr.lower()
+    if a in BASE_TOKENS or a in _extra_base:
+        return True
+    if name and name.rstrip().endswith(STOCK_SUFFIX):
+        _extra_base.add(a)
+        return True
+    return False
+
+
+@dataclass
+class PoolCreated:
+    token0: str
+    token1: str
+    fee: int
+    pool: str
+    block: int
+    tx: str
+    dex_factory: str
+
+
+def decode_pool_created(log: dict) -> PoolCreated:
+    t = log["topics"]
+    w = words(log["data"])
+    return PoolCreated(
+        token0=d_addr(t[1]),
+        token1=d_addr(t[2]),
+        fee=int(t[3], 16),
+        pool=d_addr(w[1]) if len(w) > 1 else "",
+        block=int(log["blockNumber"], 16),
+        tx=log["transactionHash"],
+        dex_factory=log["address"].lower(),
+    )
 
 
 def explorer_token(addr: str) -> str:
