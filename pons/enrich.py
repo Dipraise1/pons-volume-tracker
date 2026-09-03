@@ -8,6 +8,7 @@ balanceOf before anything is displayed.
 from __future__ import annotations
 import json
 import time
+import re
 import urllib.request
 
 from . import chain as C
@@ -318,3 +319,36 @@ def bundlers(rpc: Rpc, db: Db, token: str, blocks: int = 3) -> dict:
         "held_pct": (held_total / supply * 100) if supply else 0.0,
         "holding": holding, "sold_out": sold_out,
     }
+
+
+_IMG_CID = re.compile(rb"ipfs://(baf[a-z0-9]{56}|Qm[1-9A-HJ-NP-Za-km-z]{44})")
+_img_cache: dict[str, str | None] = {}
+PINATA = "https://gateway.pinata.cloud/ipfs/"
+
+
+def token_image_url(token: str) -> str | None:
+    """Token logo URL, or None. The image is an ipfs:// CID embedded in the
+    token's CREATION bytecode (constructor args); resolved via Pinata. Immutable,
+    so cached permanently per token (also sidesteps Blockscout rate limits)."""
+    token = token.lower()
+    if token in _img_cache:
+        return _img_cache[token]
+    url = None
+    try:
+        u = (f"{BLOCKSCOUT.replace('/api/v2','')}/api?module=contract"
+             f"&action=getcontractcreation&contractaddresses={token}")
+        req = urllib.request.Request(u, headers={"User-Agent": UA,
+                                                 "Accept": "application/json"})
+        d = json.load(urllib.request.urlopen(req, timeout=15))
+        res = d.get("result") or []
+        bc = (res[0].get("creationBytecode") or res[0].get("creation_bytecode")
+              or "") if res else ""
+        if bc:
+            raw = bytes.fromhex(bc[2:] if bc.startswith("0x") else bc)
+            m = _IMG_CID.search(raw)
+            if m:
+                url = PINATA + m.group(1).decode()
+    except Exception:
+        url = None
+    _img_cache[token] = url
+    return url

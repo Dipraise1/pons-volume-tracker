@@ -168,9 +168,10 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
         return ""
     eth_usd = _safe(lambda: idx.eth_usd(), db, 0.0, "eth_usd")
     buy = launch.initial_buy / 1e18
+    img = _safe(lambda: enrich.token_image_url(launch.token), db, None, "image")
     grade = _safe(lambda: signals.launch_grade(rpc, db, launch.token), db, {}, "grade")
     tag = grade.get("tag", "") if grade else ""
-    return "\n".join([
+    card = "\n".join([
         f"🚀 <b>{fmt.esc(row['name'] or row['symbol'])} "
         f"({fmt.esc(row['symbol'])})</b> LAUNCHED on "
         f"{C.launchpad_name(launch.factory)}"
@@ -189,6 +190,7 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
             fmt.link("tx", C.explorer_tx(launch.tx)),
         ]),
     ])
+    return f"\x01IMG\x01{img}\x01{card}" if img else card
 
 
 def quote_card(rpc: Rpc, db: Db, idx: Indexer, token: str, call_row: dict,

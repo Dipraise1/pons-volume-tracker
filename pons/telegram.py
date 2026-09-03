@@ -32,9 +32,25 @@ class Telegram:
         except Exception as exc:
             return {"ok": False, "description": str(exc)}
 
+    IMG_MARK = "\x01IMG\x01"
+
+    def send_photo(self, chat_id, photo_url: str, caption: str):
+        return self.api("sendPhoto", {
+            "chat_id": chat_id, "photo": photo_url,
+            "caption": caption[:1024], "parse_mode": "HTML"})
+
     def send(self, chat_id, text: str, preview: bool = False):
         if not chat_id:
             return {"ok": False, "description": "no chat_id"}
+        # image-tagged message: "\x01IMG\x01<url>\x01<text>"
+        if text.startswith(self.IMG_MARK):
+            url, _, body = text[len(self.IMG_MARK):].partition("\x01")
+            if url:
+                res = self.send_photo(chat_id, url, body)
+                if res.get("ok"):
+                    return res
+                # image failed (bad gateway / oversized) -> fall back to text
+            text = body
         # Telegram hard-caps messages at 4096 chars.
         for part in _split(text, 3900):
             res = self.api("sendMessage", {
