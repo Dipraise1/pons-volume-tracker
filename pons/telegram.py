@@ -48,20 +48,24 @@ class Telegram:
         image_url = None
         if text.startswith(self.IMG_MARK):
             image_url, _, text = text[len(self.IMG_MARK):].partition("\x01")
-        # With an image: send it as a real photo (guaranteed to render, unlike a
-        # link-preview which silently fails). The card rides in the caption; any
-        # overflow past Telegram's 1024-char caption cap follows as text.
+        # With an image: if the whole card fits a caption and has no block-level
+        # HTML (which can't be safely split), send it as one photo. Otherwise
+        # send the image with the headline as caption, then the FULL card as one
+        # clean text message — never split HTML tags across messages.
         if image_url:
-            parts = _split(text, 1024)
-            res = self.send_photo(chat_id, image_url, parts[0])
-            if res.get("ok"):
-                for extra in parts[1:]:
-                    self.api("sendMessage", {"chat_id": chat_id, "text": extra,
-                                             "parse_mode": "HTML",
-                                             "disable_web_page_preview": "true"})
-                    time.sleep(0.05)
-                return {"ok": True}
+            if len(text) <= 1024 and "<blockquote" not in text and "<pre" not in text:
+                res = self.send_photo(chat_id, image_url, text)
+                if res.get("ok"):
+                    return res
+            else:
+                headline = text.split("\n", 1)[0][:1024]
+                res = self.send_photo(chat_id, image_url, headline)
+                if res.get("ok"):
+                    return self._send_text(chat_id, text, preview)
             # photo failed (bad gateway / unfetchable) -> plain text fallback
+        return self._send_text(chat_id, text, preview)
+
+    def _send_text(self, chat_id, text: str, preview: bool = False):
         for part in _split(text, 3900):
             res = self.api("sendMessage", {
                 "chat_id": chat_id, "text": part, "parse_mode": "HTML",
