@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from . import chain as C
-from . import enrich, fmt, intel, signals, wallets
+from . import enrich, fmt, intel, market, signals, wallets
 from .db import Db
 from .indexer import Indexer
 from .rpc import Rpc
@@ -115,6 +115,10 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         "outcomes": lambda: enrich.trader_outcomes(db, pool),
         "top10tbl": lambda: enrich.top10_table(rpc, db, token, price_usd),
         "socials": lambda: enrich.token_offchain(rpc, db, token),
+        "dexcto": lambda: market.dex_flags(token),
+        "cto_oc": lambda: market.cto_onchain(rpc, db, token),
+        "kols": lambda: enrich.kol_buyers(db, pool),
+        "insiders": lambda: enrich.insiders(db, token),
     })
 
     if R["supply"]:
@@ -175,6 +179,18 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         for reason in sf["reasons"][:4]:
             lines.append(f" ├ {reason}")
 
+    # --- Dex Paid / CTO -------------------------------------------------
+    dex = R.get("dexcto") or {}
+    dp = ("✅" if dex.get("dex_paid") else
+          "❌" if dex.get("dex_paid") is False else "—")
+    if dex.get("cto_paid"):
+        cto = "✅"
+    elif R.get("cto_oc"):
+        cto = "🟡 maybe"
+    else:
+        cto = "❌"
+    lines.append(f"Dex Paid: {dp} | CTO: {cto}")
+
     # --- smart money ------------------------------------------------------
     smart = R["smart"] or []
     if smart:
@@ -191,11 +207,19 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
 
     # --- early activity -------------------------------------------------
     early = R["early"] or {}
-    if early and early.get("buys"):
+    kols = R.get("kols") or []
+    insiders = R.get("insiders") or 0
+    if (early and early.get("buys")) or kols or insiders:
         lines.append("Early:")
-        lines.append(f" ├ Snipers: {early['snipers']}")
-        lines.append(f" ├ Same-block buys: {early['same_block']}")
-        lines.append(f" └ Early inflow: {fmt.eth(early['early_eth'])}")
+        lines.append(f" ├ 🐁 Insiders: {insiders}")
+        if kols:
+            handles = ", ".join(h for _, h in kols[:5])
+            lines.append(f" ├ 🌟 KOLs: {len(kols)} ({fmt.esc(handles)})")
+        else:
+            lines.append(f" ├ 🌟 KOLs: 0")
+        if early:
+            lines.append(f" ├ Snipers: {early.get('snipers', 0)}")
+            lines.append(f" └ Early inflow: {fmt.eth(early.get('early_eth', 0))}")
 
     # --- holder outcome grid ---------------------------------------------
     outcomes = R["outcomes"] or []

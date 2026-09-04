@@ -407,3 +407,30 @@ def top10_table(rpc: Rpc, db: Db, token: str, price_usd: float) -> list[dict]:
             "usd": t["amount"] * price_usd, "bought": b, "sold": sold,
         })
     return out
+
+
+def kol_buyers(db: Db, pool: str) -> list[tuple[str, str]]:
+    """(address, handle) for curated KOL wallets that bought this token."""
+    kols = db.kols()
+    if not kols:
+        return []
+    rows = db.q("SELECT DISTINCT trader FROM swaps WHERE pool=? AND is_buy=1",
+                (pool,))
+    out = []
+    for r in rows:
+        tr = (r["trader"] or "").lower()
+        if tr in kols:
+            out.append((tr, kols[tr]))
+    return out
+
+
+def insiders(db: Db, token: str) -> int:
+    """Wallets in the launch block (pre-public / coordinated open)."""
+    row = db.one("SELECT pool,launch_block FROM tokens WHERE address=?",
+                 (token.lower(),))
+    if not row or not row["pool"]:
+        return 0
+    r = db.one("SELECT COUNT(DISTINCT trader) n FROM swaps "
+               "WHERE pool=? AND block<=? AND is_buy=1 AND trader IS NOT NULL",
+               (row["pool"], (row["launch_block"] or 0)))
+    return r["n"] or 0

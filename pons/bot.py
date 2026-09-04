@@ -42,6 +42,7 @@ HELP = """<b>Pons Volume Tracker</b> — Robinhood Chain
 
 <b>Admin</b> (group owners)
 /admin — admin command list
+/kols — tracked KOL wallets (/addkol 0x @handle)
 /quote &lt;coin&gt; — current volume of a called coin
 
 <b>Admin</b>
@@ -171,6 +172,34 @@ class Bot:
             return "Usage: /addadmin <telegram_user_id>"
         cfg.ADMIN_IDS.append(str(args[0]))
         return f"✅ {fmt.esc(args[0])} is now an admin (until restart)."
+
+    def cmd_addkol(self, chat_id, args, user_id=None):
+        if not self._is_admin(user_id, chat_id):
+            return "🔒 Admins only."
+        if len(args) < 2 or not (args[0].startswith("0x") and len(args[0]) == 42):
+            return "Usage: <code>/addkol 0x&lt;wallet&gt; @handle</code>"
+        self.db.add_kol(args[0], " ".join(args[1:]), int(time.time()))
+        return (f"✅ KOL added: {fmt.link(fmt.short(args[0]), C.explorer_addr(args[0]))}"
+                f" = {fmt.esc(' '.join(args[1:]))}\n<i>{len(self.db.kols())} KOL(s) tracked.</i>")
+
+    def cmd_delkol(self, chat_id, args, user_id=None):
+        if not self._is_admin(user_id, chat_id):
+            return "🔒 Admins only."
+        if not args:
+            return "Usage: <code>/delkol 0x…</code>"
+        self.db.del_kol(args[0])
+        return f"Removed KOL {fmt.short(args[0])}."
+
+    def cmd_kols(self, chat_id, args, user_id=None):
+        kols = self.db.kols()
+        if not kols:
+            return ("No KOL wallets tracked yet. Admins add them with "
+                    "<code>/addkol 0x… @handle</code> — then alerts show which "
+                    "KOLs aped each coin.")
+        out = [f"<b>🌟 {len(kols)} KOL wallet(s) tracked</b>"]
+        for a, h in list(kols.items())[:40]:
+            out.append(f"• {fmt.link(fmt.short(a), C.explorer_addr(a))} — {fmt.esc(h)}")
+        return "\n".join(out)
 
     def cmd_thresholds(self, chat_id, args, user_id=None):
         from . import config as cfg
@@ -677,6 +706,7 @@ class Bot:
         "setlog": cmd_setlog, "broadcast": cmd_broadcast, "subs": cmd_subs,
         "pauseall": cmd_pauseall, "resumeall": cmd_resumeall,
         "addadmin": cmd_addadmin, "thresholds": cmd_thresholds,
+        "addkol": cmd_addkol, "delkol": cmd_delkol, "kols": cmd_kols,
     }
 
     def _safe_handle(self, msg: dict) -> None:

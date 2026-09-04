@@ -48,18 +48,24 @@ class Telegram:
         image_url = None
         if text.startswith(self.IMG_MARK):
             image_url, _, text = text[len(self.IMG_MARK):].partition("\x01")
-        parts = _split(text, 3900)
-        for i, part in enumerate(parts):
-            params = {"chat_id": chat_id, "text": part, "parse_mode": "HTML"}
-            # attach the image preview to the last chunk (where the links live)
-            if image_url and i == len(parts) - 1:
-                params["link_preview_options"] = json.dumps({
-                    "url": image_url, "prefer_large_media": True,
-                    "show_above_text": True})
-            else:
-                params["link_preview_options"] = json.dumps(
-                    {"is_disabled": not preview})
-            res = self.api("sendMessage", params)
+        # With an image: send it as a real photo (guaranteed to render, unlike a
+        # link-preview which silently fails). The card rides in the caption; any
+        # overflow past Telegram's 1024-char caption cap follows as text.
+        if image_url:
+            parts = _split(text, 1024)
+            res = self.send_photo(chat_id, image_url, parts[0])
+            if res.get("ok"):
+                for extra in parts[1:]:
+                    self.api("sendMessage", {"chat_id": chat_id, "text": extra,
+                                             "parse_mode": "HTML",
+                                             "disable_web_page_preview": "true"})
+                    time.sleep(0.05)
+                return {"ok": True}
+            # photo failed (bad gateway / unfetchable) -> plain text fallback
+        for part in _split(text, 3900):
+            res = self.api("sendMessage", {
+                "chat_id": chat_id, "text": part, "parse_mode": "HTML",
+                "disable_web_page_preview": "false" if preview else "true"})
             if not res.get("ok"):
                 return res
             time.sleep(0.05)

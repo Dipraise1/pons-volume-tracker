@@ -114,6 +114,12 @@ CREATE TABLE IF NOT EXISTS stock_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_symbol ON stock_tokens(symbol);
 
+CREATE TABLE IF NOT EXISTS kols (
+    address   TEXT PRIMARY KEY,
+    handle    TEXT,
+    added_ts  INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS price_history (
     ts       INTEGER PRIMARY KEY,
     pons_usd REAL,
@@ -175,6 +181,18 @@ class Db:
         self.run("INSERT INTO meta(key,value) VALUES(?,?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (key, str(value)))
+
+    # --- KOLs (curated influencer wallets) -----------------------------
+    def add_kol(self, address: str, handle: str, now: int) -> None:
+        self.run("INSERT INTO kols(address,handle,added_ts) VALUES(?,?,?) "
+                 "ON CONFLICT(address) DO UPDATE SET handle=excluded.handle",
+                 (address.lower(), handle, now))
+
+    def del_kol(self, address: str) -> None:
+        self.run("DELETE FROM kols WHERE address=?", (address.lower(),))
+
+    def kols(self) -> dict:
+        return {r["address"]: r["handle"] for r in self.q("SELECT * FROM kols")}
 
     # --- followed wallets ---------------------------------------------
     def follow(self, address: str, label: str, source: str, now: int) -> bool:
