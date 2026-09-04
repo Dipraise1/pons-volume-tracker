@@ -40,6 +40,19 @@ def _i(key: str, default: int) -> int:
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 RPC_URL = os.environ.get("RPC_URL", "https://rpc.mainnet.chain.robinhood.com").strip()
+# eth_getLogs endpoint: the public RPC allows wide ranges (QuickNode free caps
+# them at 5 blocks). Everything else uses RPC_URL (fast, no rate limit).
+LOGS_URL = os.environ.get("LOGS_URL", "https://rpc.mainnet.chain.robinhood.com").strip()
+try:
+    from . import rpc as _rpc
+    _rpc.DEFAULT_LOGS_URL = LOGS_URL
+except Exception:
+    pass
+# The endpoint is latency-bound, not rate-limited: one connection tops out
+# near 1 req/s while four sustain ~460 calls/s in batches of 100. Throughput
+# stops improving past ~4 connections, and batches of 500+ are refused (429).
+RPC_CONCURRENCY = _i("RPC_CONCURRENCY", 4)
+RPC_CHUNK = _i("RPC_CHUNK", 100)
 
 BACKFILL_HOURS = _f("BACKFILL_HOURS", 6)
 LAUNCH_BACKFILL_DAYS = _f("LAUNCH_BACKFILL_DAYS", 2)

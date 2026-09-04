@@ -114,7 +114,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         "early": lambda: enrich.early_activity(db, token),
         "outcomes": lambda: enrich.trader_outcomes(db, pool),
         "top10tbl": lambda: enrich.top10_table(rpc, db, token, price_usd),
-        "socials": lambda: enrich.token_offchain(token),
+        "socials": lambda: enrich.token_offchain(rpc, db, token),
     })
 
     if R["supply"]:
@@ -156,14 +156,16 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         lines.append(f" └ {tops}")
         tbl = R.get("top10tbl") or []
         if tbl:
-            rows = ["Top10  MCap    Buy     Sell    Left"]
+            rows = ["Top 10 in detail",
+                    "User    MCap    Buy     Sell    Left"]
             for r in tbl:
                 a = f"{r['addr'][2:6]}..{r['addr'][-2:]}"
                 sold = fmt.num(r["sold"]) if r["sold"] else "—"
-                rows.append(f"{a:<7}{fmt.num(r['usd']):<8}"
+                rows.append(f"{a:<8}{fmt.num(r['usd']):<8}"
                             f"{fmt.num(r['bought']):<8}{sold:<8}"
                             f"{fmt.num(r['left'])}")
-            lines.append("<pre>" + "\n".join(fmt.esc(x) for x in rows) + "</pre>")
+            body = "\n".join(fmt.esc(x) for x in rows)
+            lines.append(f"<blockquote expandable>{body}</blockquote>")
 
     # --- safety ---------------------------------------------------------
     sf = R["safety"] or {}
@@ -222,7 +224,11 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         fmt.link("pool", C.explorer_addr(pool)),
         fmt.link("dev", C.explorer_addr(row["deployer"] or "")),
     ]))
-    return "\n".join(lines)
+    card = "\n".join(lines)
+    # Attach the token's logo as a pinned image preview when its creation
+    # bytecode carries one (most launchpad tokens do).
+    img = soc.get("image")
+    return f"\x01IMG\x01{img}\x01{card}" if img else card
 
 
 def trade_links(token: str, pool: str) -> list:
@@ -243,7 +249,7 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
         return ""
     eth_usd = _safe(lambda: idx.eth_usd(), db, 0.0, "eth_usd")
     buy = launch.initial_buy / 1e18
-    off = _safe(lambda: enrich.token_offchain(launch.token), db, {}, "offchain")
+    off = _safe(lambda: enrich.token_offchain(rpc, db, launch.token), db, {}, "offchain")
     img = off.get("image") if off else None
     grade = _safe(lambda: signals.launch_grade(rpc, db, launch.token), db, {}, "grade")
     tag = grade.get("tag", "") if grade else ""

@@ -42,23 +42,24 @@ class Telegram:
     def send(self, chat_id, text: str, preview: bool = False):
         if not chat_id:
             return {"ok": False, "description": "no chat_id"}
-        # image-tagged message: "\x01IMG\x01<url>\x01<text>"
+        # image-tagged message: "\x01IMG\x01<url>\x01<text>".
+        # The image is shown as a pinned large link-preview (keeps the full card
+        # intact, unlike a photo caption which is capped at 1024 chars).
+        image_url = None
         if text.startswith(self.IMG_MARK):
-            url, _, body = text[len(self.IMG_MARK):].partition("\x01")
-            if url:
-                res = self.send_photo(chat_id, url, body)
-                if res.get("ok"):
-                    return res
-                # image failed (bad gateway / oversized) -> fall back to text
-            text = body
-        # Telegram hard-caps messages at 4096 chars.
-        for part in _split(text, 3900):
-            res = self.api("sendMessage", {
-                "chat_id": chat_id,
-                "text": part,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": "false" if preview else "true",
-            })
+            image_url, _, text = text[len(self.IMG_MARK):].partition("\x01")
+        parts = _split(text, 3900)
+        for i, part in enumerate(parts):
+            params = {"chat_id": chat_id, "text": part, "parse_mode": "HTML"}
+            # attach the image preview to the last chunk (where the links live)
+            if image_url and i == len(parts) - 1:
+                params["link_preview_options"] = json.dumps({
+                    "url": image_url, "prefer_large_media": True,
+                    "show_above_text": True})
+            else:
+                params["link_preview_options"] = json.dumps(
+                    {"is_disabled": not preview})
+            res = self.api("sendMessage", params)
             if not res.get("ok"):
                 return res
             time.sleep(0.05)

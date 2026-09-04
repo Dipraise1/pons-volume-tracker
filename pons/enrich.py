@@ -327,47 +327,54 @@ _meta_off_cache: dict[str, dict] = {}
 PINATA = "https://gateway.pinata.cloud/ipfs/"
 
 
-def token_offchain(token: str) -> dict:
-    """Image + socials embedded in a token's CREATION bytecode (constructor
-    args): the logo ipfs CID plus any website / X / Telegram URLs. Immutable —
-    cached permanently per token (also sidesteps Blockscout rate limits)."""
+def token_offchain(rpc: Rpc, db: Db, token: str) -> dict:
+    """Image + socials for a token: the logo ipfs CID plus website / X / Telegram
+    URLs. These live in the launch transaction's input (the factory call's
+    constructor args), read via RPC — Blockscout is Cloudflare-blocked from
+    datacenter IPs, so RPC is the reliable path. Immutable → cached per token."""
     token = token.lower()
     if token in _meta_off_cache:
         return _meta_off_cache[token]
     meta = {"image": None, "web": None, "x": None, "telegram": None}
+    row = db.one("SELECT tx FROM tokens WHERE address=?", (token,))
+    tx = row["tx"] if row else None
+    if not tx:
+        return meta
+    raw = b""
+    for attempt in range(3):
+        try:
+            t = rpc.call("eth_getTransactionByHash", [tx])
+            inp = (t or {}).get("input", "")
+            if inp and inp != "0x":
+                raw = bytes.fromhex(inp[2:])
+            break
+        except Exception:
+            time.sleep(0.5 * (attempt + 1))
+    if not raw:
+        return meta   # transient failure — not cached
     try:
-        u = (f"{BLOCKSCOUT.replace('/api/v2','')}/api?module=contract"
-             f"&action=getcontractcreation&contractaddresses={token}")
-        req = urllib.request.Request(u, headers={"User-Agent": UA,
-                                                 "Accept": "application/json"})
-        d = json.load(urllib.request.urlopen(req, timeout=15))
-        res = d.get("result") or []
-        bc = (res[0].get("creationBytecode") or res[0].get("creation_bytecode")
-              or "") if res else ""
-        if bc:
-            raw = bytes.fromhex(bc[2:] if bc.startswith("0x") else bc)
-            m = _IMG_CID.search(raw)
-            if m:
-                meta["image"] = PINATA + m.group(1).decode()
-            for b in _URL_RE.findall(raw):
-                url = b.decode("ascii", "replace")
-                low = url.lower()
-                if "ipfs" in low or "pinata" in low:
-                    continue
-                if ("x.com/" in low or "twitter.com/" in low) and not meta["x"]:
-                    meta["x"] = url
-                elif "t.me/" in low and not meta["telegram"]:
-                    meta["telegram"] = url
-                elif not meta["web"]:
-                    meta["web"] = url
+        m = _IMG_CID.search(raw)
+        if m:
+            meta["image"] = PINATA + m.group(1).decode()
+        for b in _URL_RE.findall(raw):
+            url = b.decode("ascii", "replace")
+            low = url.lower()
+            if "ipfs" in low or "pinata" in low:
+                continue
+            if ("x.com/" in low or "twitter.com/" in low) and not meta["x"]:
+                meta["x"] = url
+            elif "t.me/" in low and not meta["telegram"]:
+                meta["telegram"] = url
+            elif not meta["web"]:
+                meta["web"] = url
     except Exception:
         pass
     _meta_off_cache[token] = meta
     return meta
 
 
-def token_image_url(token: str) -> str | None:
-    return token_offchain(token).get("image")
+def token_image_url(rpc: Rpc, db: Db, token: str) -> str | None:
+    return token_offchain(rpc, db, token).get("image")
 
 
 def top10_table(rpc: Rpc, db: Db, token: str, price_usd: float) -> list[dict]:
