@@ -226,13 +226,15 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
 
 
 def trade_links(token: str, pool: str) -> list:
-    """Quick-trade / view links for an alert footer (Robinhood Chain).
-    URL templates confirmed for chain 4663; refined from link recon."""
-    out = [fmt.link("Pons", f"https://www.ponslaunchpad.com/token/{token}")]
-    if pool:
-        out.append(fmt.link("GeckoTerminal",
-                            f"https://www.geckoterminal.com/robinhood/pools/{pool}"))
-    return out
+    """Quick-trade / view links for an alert footer (Robinhood Chain, chain
+    4663). All token-address based; templates verified against live endpoints."""
+    return [
+        fmt.link("Pons", f"https://www.ponsfamily.com/launchpad/{token}"),
+        fmt.link("GMGN", f"https://gmgn.ai/robinhood/token/{token}"),
+        fmt.link("Axiom", f"https://axiom.trade/t/{token}?chain=robinhood"),
+        fmt.link("MevX", f"https://mevx.io/robinhood/{token}"),
+        fmt.link("Gecko", f"https://www.geckoterminal.com/robinhood/tokens/{token}"),
+    ]
 
 
 def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
@@ -241,10 +243,11 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
         return ""
     eth_usd = _safe(lambda: idx.eth_usd(), db, 0.0, "eth_usd")
     buy = launch.initial_buy / 1e18
-    img = _safe(lambda: enrich.token_image_url(launch.token), db, None, "image")
+    off = _safe(lambda: enrich.token_offchain(launch.token), db, {}, "offchain")
+    img = off.get("image") if off else None
     grade = _safe(lambda: signals.launch_grade(rpc, db, launch.token), db, {}, "grade")
     tag = grade.get("tag", "") if grade else ""
-    card = "\n".join([
+    parts = [
         f"🚀 <b>{fmt.esc(row['name'] or row['symbol'])} "
         f"({fmt.esc(row['symbol'])})</b> LAUNCHED on "
         f"{C.launchpad_name(launch.factory)}"
@@ -256,13 +259,26 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
         f"Dex:     {C.launchpad_name(row['factory'])}",
         f"Block:   {launch.block:,}",
         f"Dev:     {fmt.link(fmt.short(launch.deployer), C.explorer_addr(launch.deployer))}",
+    ]
+    sparts = []
+    if off.get("web"):
+        sparts.append(fmt.link("Web", off["web"]))
+    if off.get("x"):
+        sparts.append(fmt.link("X", off["x"]))
+    if off.get("telegram"):
+        sparts.append(fmt.link("TG", off["telegram"]))
+    if sparts:
+        parts.append("Socials: " + " · ".join(sparts))
+    parts += [
         "",
+        "📈 " + " · ".join(trade_links(row["address"], launch.pool)),
         " · ".join([
-            fmt.link("token", C.explorer_token(row["address"])),
+            fmt.link("chart", C.explorer_token(row["address"])),
             fmt.link("pool", C.explorer_addr(launch.pool)),
             fmt.link("tx", C.explorer_tx(launch.tx)),
         ]),
-    ])
+    ]
+    card = "\n".join(parts)
     return f"\x01IMG\x01{img}\x01{card}" if img else card
 
 
