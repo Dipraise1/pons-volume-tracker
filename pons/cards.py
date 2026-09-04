@@ -95,7 +95,7 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         "",
         f"<code>{row['address']}</code>",
         f"USD:  {fmt.usd(price_usd)} ({_pct(p_chg)})",
-        f"Dex:  Uniswap V3 · {C.launchpad_name(row['factory'])}",
+        f"Dex:  {C.launchpad_name(row['factory'])}",
         f"MC:   {fmt.usd(mcap)} | ⏳ {_age(row['launch_ts'])}",
         f"Vol:  {fmt.usd(hour['v'] * eth_usd)} | 1H: "
         f"{_pct(v_1h) if v_1h is not None else 'new'} "
@@ -113,6 +113,8 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         "deployer": lambda: intel.deployer_history(rpc, db, row["deployer"]),
         "early": lambda: enrich.early_activity(db, token),
         "outcomes": lambda: enrich.trader_outcomes(db, pool),
+        "top10tbl": lambda: enrich.top10_table(rpc, db, token, price_usd),
+        "socials": lambda: enrich.token_offchain(token),
     })
 
     if R["supply"]:
@@ -152,6 +154,16 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
                      f"Top 10: {snap['top10_pct']:.1f}%")
         tops = "|".join(f"{t['pct']:.1f}" for t in snap["top"])
         lines.append(f" └ {tops}")
+        tbl = R.get("top10tbl") or []
+        if tbl:
+            rows = ["Top10  MCap    Buy     Sell    Left"]
+            for r in tbl:
+                a = f"{r['addr'][2:6]}..{r['addr'][-2:]}"
+                sold = fmt.num(r["sold"]) if r["sold"] else "—"
+                rows.append(f"{a:<7}{fmt.num(r['usd']):<8}"
+                            f"{fmt.num(r['bought']):<8}{sold:<8}"
+                            f"{fmt.num(r['left'])}")
+            lines.append("<pre>" + "\n".join(fmt.esc(x) for x in rows) + "</pre>")
 
     # --- safety ---------------------------------------------------------
     sf = R["safety"] or {}
@@ -192,13 +204,35 @@ def volume_card(rpc: Rpc, db: Db, idx: Indexer, token: str,
         sold = outcomes.count("sold")
         lines.append(f" └ Hold {hold} | Sold part {part} | Sold {sold}")
 
+    soc = R.get("socials") or {}
+    sparts = []
+    if soc.get("web"):
+        sparts.append(fmt.link("Web", soc["web"]))
+    if soc.get("x"):
+        sparts.append(fmt.link("X", soc["x"]))
+    if soc.get("telegram"):
+        sparts.append(fmt.link("TG", soc["telegram"]))
+    if sparts:
+        lines.append("Socials: " + " · ".join(sparts))
+
     lines.append("")
+    lines.append("📈 " + " · ".join(trade_links(row["address"], pool)))
     lines.append(" · ".join([
-        fmt.link("token", C.explorer_token(row["address"])),
+        fmt.link("chart", C.explorer_token(row["address"])),
         fmt.link("pool", C.explorer_addr(pool)),
-        fmt.link("deployer", C.explorer_addr(row["deployer"] or "")),
+        fmt.link("dev", C.explorer_addr(row["deployer"] or "")),
     ]))
     return "\n".join(lines)
+
+
+def trade_links(token: str, pool: str) -> list:
+    """Quick-trade / view links for an alert footer (Robinhood Chain).
+    URL templates confirmed for chain 4663; refined from link recon."""
+    out = [fmt.link("Pons", f"https://www.ponslaunchpad.com/token/{token}")]
+    if pool:
+        out.append(fmt.link("GeckoTerminal",
+                            f"https://www.geckoterminal.com/robinhood/pools/{pool}"))
+    return out
 
 
 def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
@@ -219,7 +253,7 @@ def launch_card(rpc: Rpc, db: Db, idx: Indexer, launch) -> str:
         f"<code>{row['address']}</code>",
         f"Supply:  {fmt.num(row['total_supply'] or 0)}",
         f"Dev buy: {fmt.eth(buy)} ({fmt.usd(buy * eth_usd)})",
-        f"Dex:     Uniswap V3 · {C.launchpad_name(row['factory'])}",
+        f"Dex:     {C.launchpad_name(row['factory'])}",
         f"Block:   {launch.block:,}",
         f"Dev:     {fmt.link(fmt.short(launch.deployer), C.explorer_addr(launch.deployer))}",
         "",

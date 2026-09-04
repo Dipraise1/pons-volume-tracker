@@ -322,18 +322,19 @@ def bundlers(rpc: Rpc, db: Db, token: str, blocks: int = 3) -> dict:
 
 
 _IMG_CID = re.compile(rb"ipfs://(baf[a-z0-9]{56}|Qm[1-9A-HJ-NP-Za-km-z]{44})")
-_img_cache: dict[str, str | None] = {}
+_URL_RE = re.compile(rb"https?://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]{4,160}")
+_meta_off_cache: dict[str, dict] = {}
 PINATA = "https://gateway.pinata.cloud/ipfs/"
 
 
-def token_image_url(token: str) -> str | None:
-    """Token logo URL, or None. The image is an ipfs:// CID embedded in the
-    token's CREATION bytecode (constructor args); resolved via Pinata. Immutable,
-    so cached permanently per token (also sidesteps Blockscout rate limits)."""
+def token_offchain(token: str) -> dict:
+    """Image + socials embedded in a token's CREATION bytecode (constructor
+    args): the logo ipfs CID plus any website / X / Telegram URLs. Immutable —
+    cached permanently per token (also sidesteps Blockscout rate limits)."""
     token = token.lower()
-    if token in _img_cache:
-        return _img_cache[token]
-    url = None
+    if token in _meta_off_cache:
+        return _meta_off_cache[token]
+    meta = {"image": None, "web": None, "x": None, "telegram": None}
     try:
         u = (f"{BLOCKSCOUT.replace('/api/v2','')}/api?module=contract"
              f"&action=getcontractcreation&contractaddresses={token}")
@@ -347,8 +348,55 @@ def token_image_url(token: str) -> str | None:
             raw = bytes.fromhex(bc[2:] if bc.startswith("0x") else bc)
             m = _IMG_CID.search(raw)
             if m:
-                url = PINATA + m.group(1).decode()
+                meta["image"] = PINATA + m.group(1).decode()
+            for b in _URL_RE.findall(raw):
+                url = b.decode("ascii", "replace")
+                low = url.lower()
+                if "ipfs" in low or "pinata" in low:
+                    continue
+                if ("x.com/" in low or "twitter.com/" in low) and not meta["x"]:
+                    meta["x"] = url
+                elif "t.me/" in low and not meta["telegram"]:
+                    meta["telegram"] = url
+                elif not meta["web"]:
+                    meta["web"] = url
     except Exception:
-        url = None
-    _img_cache[token] = url
-    return url
+        pass
+    _meta_off_cache[token] = meta
+    return meta
+
+
+def token_image_url(token: str) -> str | None:
+    return token_offchain(token).get("image")
+
+
+def top10_table(rpc: Rpc, db: Db, token: str, price_usd: float) -> list[dict]:
+    """Per-top-holder buy / sell / current, for the monospace detail block.
+
+    Holders come from the verified snapshot (balances confirmed on-chain);
+    buy/sell come from indexed swaps for that trader on this token's pool.
+    """
+    snap = holder_snapshot(rpc, db, token) or {}
+    tops = snap.get("top") or []
+    if not tops:
+        return []
+    row = db.one("SELECT pool FROM tokens WHERE address=?", (token.lower(),))
+    pool = row["pool"] if row else None
+    trades = {}
+    if pool:
+        for r in db.q(
+            "SELECT trader, "
+            "  SUM(CASE WHEN is_buy=1 THEN token_amt ELSE 0 END) bought, "
+            "  SUM(CASE WHEN is_buy=0 THEN token_amt ELSE 0 END) sold "
+            "FROM swaps WHERE pool=? AND trader IS NOT NULL GROUP BY trader",
+            (pool,)):
+            trades[r["trader"].lower()] = (abs(r["bought"] or 0),
+                                           abs(r["sold"] or 0))
+    out = []
+    for t in tops[:10]:
+        b, sold = trades.get(t["address"].lower(), (0.0, 0.0))
+        out.append({
+            "addr": t["address"], "pct": t["pct"], "left": t["amount"],
+            "usd": t["amount"] * price_usd, "bought": b, "sold": sold,
+        })
+    return out
