@@ -28,8 +28,10 @@ def burst_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     """Per-token buy-volume bursts over a short window."""
     now = int(time.time())
     since = now - cfg.VOL_WINDOW
+    # Query at the lower (fresh) floor; then require the age-appropriate floor.
+    floor = min(cfg.VOL_MIN_ETH, cfg.FRESH_VOL_MIN_ETH)
     rows = db.q(
-        "SELECT s.pool, t.address, "
+        "SELECT s.pool, t.address, t.launch_ts, "
         "  COALESCE(SUM(ABS(s.weth_amt)),0) vol, "
         "  COALESCE(SUM(CASE WHEN s.is_buy=1 THEN ABS(s.weth_amt) END),0) buy_vol, "
         "  COALESCE(SUM(s.is_buy),0) buys, COUNT(*) n "
@@ -37,21 +39,28 @@ def burst_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
         "WHERE s.ts >= ? AND t.address != ? "   # PONS itself excluded
         "GROUP BY s.pool HAVING buy_vol >= ? "
         "ORDER BY buy_vol DESC LIMIT ?",
-        (since, C.PONS, cfg.VOL_MIN_ETH, cfg.MAX_ALERTS_PER_CYCLE))
+        (since, C.PONS, floor, cfg.MAX_ALERTS_PER_CYCLE * 3))
 
     out = []
     for r in rows:
         token = r["address"]
+        fresh = bool(r["launch_ts"]) and (now - r["launch_ts"]) <= cfg.FRESH_WINDOW
+        need = cfg.FRESH_VOL_MIN_ETH if fresh else cfg.VOL_MIN_ETH
+        if r["buy_vol"] < need:
+            continue
         if not db.alert_ready("burst", token, now, cfg.ALERT_COOLDOWN):
             continue
         db.mark_alert("burst", token, now)
         burst = {"weth": r["vol"], "buy_weth": r["buy_vol"],
                  "buys": r["buys"], "swaps": r["n"]}
+        head = "🌱 EARLY BUY" if fresh else "NEW ALERT"
         card = cards.volume_card(rpc, db, idx, token, cfg.VOL_WINDOW,
-                                 burst, cfg.VOL_MIN_ETH)
+                                 burst, need, headline=head)
         if card:
             out.append(card)
             _record(db, idx, token, "burst")
+        if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
+            break
     return out
 
 
@@ -100,19 +109,24 @@ def graduation_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
         step = max((x for x in GRAD_STEPS if pct >= x), default=None)
         if step is None:
             continue
-        key = f"{r['address']}:{step}"
+        # Only the final graduation is worth a note; skip the intermediate
+        # milestones (they fire late, after the token has usually already run).
+        if not (g["graduated"] or step == 100):
+            continue
+        key = f"{r['address']}:done"
         if not db.alert_ready("grad", key, now, FOREVER):
             continue
         db.mark_alert("grad", key, now)
-        head = ("🎓 GRADUATED" if (g["graduated"] or step == 100)
-                else f"📊 {step}% TO GRADUATION")
-        burst = {"weth": r["vol"], "buy_weth": r["buy_vol"],
-                 "buys": r["buys"], "swaps": r["n"]}
-        card = cards.volume_card(rpc, db, idx, r["address"], 3600, burst,
-                                 cfg.VOL_MIN_ETH, headline=head)
-        if card:
-            out.append(card)
-            _record(db, idx, r["address"], "graduation")
+        eth = _eth_usd(idx, db)
+        # Compact note, not a full siren card — graduation is a status update.
+        out.append("\n".join([
+            f"🎓 <b>{fmt.esc(r['name'] or r['symbol'])} ({fmt.esc(r['symbol'])})"
+            f"</b> graduated",
+            f"Filled {g['threshold']:.1f} Ξ · 1h vol {fmt.eth(r['vol'])} "
+            f"({fmt.usd(r['vol']*eth)})",
+            f"<code>{r['address']}</code>",
+            fmt.link("chart", C.explorer_token(r["address"])),
+        ]))
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
     return out
@@ -314,29 +328,37 @@ def velocity_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     window, intensity scaled up to VELOCITY_MAX_ETH."""
     now = int(time.time())
     win = cfg.VELOCITY_WINDOW
+    floor = min(cfg.VELOCITY_MIN_ETH, cfg.FRESH_VELOCITY_MIN_ETH)
     rows = db.q(
-        "SELECT s.pool, t.address, "
+        "SELECT s.pool, t.address, t.launch_ts, "
         "  COALESCE(SUM(CASE WHEN s.is_buy=1 THEN ABS(s.weth_amt) END),0) buy_vol, "
         "  COALESCE(SUM(ABS(s.weth_amt)),0) vol, "
         "  COALESCE(SUM(s.is_buy),0) buys, COUNT(*) n "
         "FROM swaps s JOIN tokens t ON t.pool = s.pool "
         "WHERE s.ts >= ? AND t.address != ? "
         "GROUP BY s.pool HAVING buy_vol >= ? ORDER BY buy_vol DESC LIMIT ?",
-        (now - win, C.PONS, cfg.VELOCITY_MIN_ETH, cfg.MAX_ALERTS_PER_CYCLE))
+        (now - win, C.PONS, floor, cfg.MAX_ALERTS_PER_CYCLE * 3))
     out = []
     for r in rows:
+        fresh = bool(r["launch_ts"]) and (now - r["launch_ts"]) <= cfg.FRESH_WINDOW
+        need = cfg.FRESH_VELOCITY_MIN_ETH if fresh else cfg.VELOCITY_MIN_ETH
+        if r["buy_vol"] < need:
+            continue
         if not db.alert_ready("velocity", r["address"], now, cfg.VELOCITY_COOLDOWN):
             continue
         db.mark_alert("velocity", r["address"], now)
         rate = r["buy_vol"] / (win / 60)   # Ξ per minute
         burst = {"weth": r["vol"], "buy_weth": r["buy_vol"],
                  "buys": r["buys"], "swaps": r["n"]}
-        head = f"⚡ BUY VELOCITY {r['buy_vol']:.2f}Ξ/{win//60}m ({rate:.2f}Ξ/min)"
+        tag = "🌱 EARLY " if fresh else ""
+        head = f"{tag}⚡ BUY VELOCITY {r['buy_vol']:.2f}Ξ/{win//60}m ({rate:.2f}Ξ/min)"
         card = cards.volume_card(rpc, db, idx, r["address"], win, burst,
-                                 cfg.VELOCITY_MIN_ETH, headline=head)
+                                 need, headline=head)
         if card:
             out.append(card)
             _record(db, idx, r["address"], "velocity")
+        if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
+            break
     return out
 
 

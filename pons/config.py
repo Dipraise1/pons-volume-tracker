@@ -71,6 +71,12 @@ VELOCITY_MAX_ETH = _f("VELOCITY_MAX_ETH", 20.0)  # top of the intensity scale
 VELOCITY_WINDOW = _i("VELOCITY_WINDOW", 300)     # 5 min (the "1-5 min" window)
 VELOCITY_COOLDOWN = _i("VELOCITY_COOLDOWN", 600)
 
+# Fresh-token sensitivity: the alpha is in early low-mcap movers, so fresh
+# tokens trigger on much less volume than established ones.
+FRESH_WINDOW = _i("FRESH_WINDOW", 3600)            # "fresh" for this long after launch
+FRESH_VOL_MIN_ETH = _f("FRESH_VOL_MIN_ETH", 0.02)  # burst floor for fresh tokens
+FRESH_VELOCITY_MIN_ETH = _f("FRESH_VELOCITY_MIN_ETH", 0.5)  # velocity floor for fresh
+
 # Volume-burst alerts (the primary signal)
 VOL_WINDOW = _i("VOL_WINDOW", 180)              # seconds
 VOL_MIN_ETH = _f("VOL_MIN_ETH", 0.05)           # buy volume in that window
