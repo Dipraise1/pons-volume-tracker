@@ -95,6 +95,14 @@ def launch_grade(rpc, db: Db, token: str) -> dict:
     if snipers >= 5:
         score -= 15
     tag = "🟢 SAFE" if score >= 75 else "🟡 RISKY" if score >= 50 else "🔴 AVOID"
+    # A poor/critical token goes on the re-analysis watchlist so it is re-checked
+    # and re-alerted if it later turns good (LP locks, dev sells, CTO, etc.).
+    if score < 50:
+        try:
+            import time as _t
+            db.add_watch(token, max(0, score), int(_t.time()))
+        except Exception:
+            pass
     return {"tag": tag, "score": max(0, score),
             "lp_locked": sf.get("lp_locked"), "dev_pct": sf.get("dev_pct"),
             "top10": sf.get("top10"), "snipers": snipers,

@@ -84,6 +84,13 @@ DEDUP_WINDOW = _i("DEDUP_WINDOW", 21600)     # one alert per token per 6h (any t
 MIN_POOL_ETH = _f("MIN_POOL_ETH", 0.3)       # skip tokens with a near-empty pool
 DISABLE_VOLUME_LOG = _i("DISABLE_VOLUME_LOG", 1)  # kill the broad any-token feed
 
+# Re-analysis of poor/critical tokens (re-alert if they turn good)
+REANALYZE_INTERVAL = _i("REANALYZE_INTERVAL", 600)   # re-check cadence (s)
+WATCH_GOOD_SCORE = _i("WATCH_GOOD_SCORE", 75)        # score that counts as "now good"
+WATCH_MAX_PER_PASS = _i("WATCH_MAX_PER_PASS", 8)     # cap RPC-heavy re-grades/pass
+WATCH_MIN_VOL_ETH = _f("WATCH_MIN_VOL_ETH", 0.2)     # min 1h volume to bother re-checking
+WATCH_EXPIRY_DAYS = _f("WATCH_EXPIRY_DAYS", 3)       # drop dead tokens after this
+
 # Volume-burst alerts (the primary signal)
 VOL_WINDOW = _i("VOL_WINDOW", 180)              # seconds
 VOL_MIN_ETH = _f("VOL_MIN_ETH", 0.05)           # buy volume in that window

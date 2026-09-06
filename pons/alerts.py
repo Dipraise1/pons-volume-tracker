@@ -541,6 +541,55 @@ def stock_messages(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     return out
 
 
+def reanalyze_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
+    """Re-check tokens previously graded poor/critical. If one has turned good
+    (LP locked, dev sold, CTO, distribution improved) AND is still trading,
+    re-alert it as a fresh call with the full card."""
+    now = int(time.time())
+    if not db.alert_ready("reanalyze", "_", now, cfg.REANALYZE_INTERVAL):
+        return []
+    db.mark_alert("reanalyze", "_", now)
+    out, checked = [], 0
+    for w in db.watchlist("poor", 200):
+        token = w["address"]
+        row = db.one("SELECT pool, launch_ts FROM tokens WHERE address=?", (token,))
+        if not row or not row["pool"]:
+            db.drop_watch(token)
+            continue
+        v = db.one("SELECT COALESCE(SUM(ABS(weth_amt)),0) vol, "
+                   "COALESCE(SUM(is_buy),0) buys, COUNT(*) n FROM swaps "
+                   "WHERE pool=? AND ts>=?", (row["pool"], now - 3600))
+        # dead token: no recent volume -> expire or defer
+        if (v["vol"] or 0) < cfg.WATCH_MIN_VOL_ETH:
+            if now - (row["launch_ts"] or now) > cfg.WATCH_EXPIRY_DAYS * 86400:
+                db.drop_watch(token)
+            else:
+                db.touch_watch(token, w["best_score"], now)
+            continue
+        if checked >= cfg.WATCH_MAX_PER_PASS:
+            break
+        checked += 1
+        g = signals.launch_grade(rpc, db, token)
+        score = g.get("score", 0)
+        db.touch_watch(token, score, now)
+        # turned good AND still actionable -> re-alert as a fresh call
+        if score >= cfg.WATCH_GOOD_SCORE and _useful(
+                db, idx, token, row["pool"], v["buys"], v["n"]):
+            burst = {"weth": v["vol"], "buy_weth": v["vol"],
+                     "buys": v["buys"], "swaps": v["n"]}
+            head = f"♻️ RE-RATED — NOW {g.get('tag','SAFE')} ({score}/100)"
+            card = cards.volume_card(rpc, db, idx, token, 3600, burst,
+                                     cfg.WATCH_MIN_VOL_ETH, headline=head)
+            if card:
+                out.append(card)
+                db.resolve_watch(token, "redeemed")
+                _mark_alerted(db, token)
+                _record(db, idx, token, "rerate")
+        if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
+            break
+    return out
+
+
 def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     if db.get_meta("global_paused", "0") == "1":
         return []
@@ -552,6 +601,7 @@ def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     # New launches (graded) and quotes on coins we already called.
     msgs += launch_messages(rpc, db, idx, tick.new_launches)
     msgs += quote_messages(rpc, db, idx)
+    msgs += reanalyze_messages(rpc, db, idx)
     # Lightweight status notes.
     msgs += graduation_messages(rpc, db, idx)
     msgs += whale_messages(rpc, db, idx, tick.new_swaps)

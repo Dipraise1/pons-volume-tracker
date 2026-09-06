@@ -120,6 +120,16 @@ CREATE TABLE IF NOT EXISTS kols (
     added_ts  INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS watchlist (
+    address     TEXT PRIMARY KEY,
+    first_score INTEGER,
+    best_score  INTEGER,
+    added_ts    INTEGER,
+    checked_ts  INTEGER,
+    status      TEXT DEFAULT 'poor'   -- poor | redeemed
+);
+CREATE INDEX IF NOT EXISTS idx_watch_status ON watchlist(status);
+
 CREATE TABLE IF NOT EXISTS price_history (
     ts       INTEGER PRIMARY KEY,
     pons_usd REAL,
@@ -181,6 +191,30 @@ class Db:
         self.run("INSERT INTO meta(key,value) VALUES(?,?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (key, str(value)))
+
+    # --- re-analysis watchlist (poor/critical tokens) ------------------
+    def add_watch(self, address: str, score: int, now: int) -> None:
+        self.run("INSERT INTO watchlist(address,first_score,best_score,"
+                 "added_ts,checked_ts,status) VALUES(?,?,?,?,?,'poor') "
+                 "ON CONFLICT(address) DO NOTHING",
+                 (address.lower(), score, score, now, now))
+
+    def watchlist(self, status: str = "poor", limit: int = 200) -> list:
+        return [dict(r) for r in self.q(
+            "SELECT * FROM watchlist WHERE status=? ORDER BY checked_ts ASC "
+            "LIMIT ?", (status, limit))]
+
+    def touch_watch(self, address: str, score: int, now: int) -> None:
+        self.run("UPDATE watchlist SET checked_ts=?, "
+                 "best_score=MAX(best_score,?) WHERE address=?",
+                 (now, score, address.lower()))
+
+    def resolve_watch(self, address: str, status: str) -> None:
+        self.run("UPDATE watchlist SET status=? WHERE address=?",
+                 (status, address.lower()))
+
+    def drop_watch(self, address: str) -> None:
+        self.run("DELETE FROM watchlist WHERE address=?", (address.lower(),))
 
     # --- KOLs (curated influencer wallets) -----------------------------
     def add_kol(self, address: str, handle: str, now: int) -> None:
