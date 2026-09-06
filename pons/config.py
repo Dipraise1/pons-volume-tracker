@@ -77,6 +77,13 @@ FRESH_WINDOW = _i("FRESH_WINDOW", 3600)            # "fresh" for this long after
 FRESH_VOL_MIN_ETH = _f("FRESH_VOL_MIN_ETH", 0.02)  # burst floor for fresh tokens
 FRESH_VELOCITY_MIN_ETH = _f("FRESH_VELOCITY_MIN_ETH", 0.5)  # velocity floor for fresh
 
+# Usefulness gate — suppress alerts that aren't actionable for a meme trader.
+MAX_MCAP_USD = _f("MAX_MCAP_USD", 1500000)   # skip already-big tokens (no upside)
+MIN_BUY_RATIO = _f("MIN_BUY_RATIO", 0.55)    # skip sell-dominated "pumps"
+DEDUP_WINDOW = _i("DEDUP_WINDOW", 21600)     # one alert per token per 6h (any type)
+MIN_POOL_ETH = _f("MIN_POOL_ETH", 0.3)       # skip tokens with a near-empty pool
+DISABLE_VOLUME_LOG = _i("DISABLE_VOLUME_LOG", 1)  # kill the broad any-token feed
+
 # Volume-burst alerts (the primary signal)
 VOL_WINDOW = _i("VOL_WINDOW", 180)              # seconds
 VOL_MIN_ETH = _f("VOL_MIN_ETH", 0.05)           # buy volume in that window

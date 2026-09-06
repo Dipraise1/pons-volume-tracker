@@ -24,6 +24,35 @@ def launch_messages(rpc, db, idx, launches) -> list[str]:
     return [cards.launch_card(rpc, db, idx, l) for l in launches] if launches else []
 
 
+def _useful(db: Db, idx: Indexer, token: str, pool: str,
+            buys: int, n: int) -> bool:
+    """True only if this alert is actionable for a meme trader. Filters out the
+    noise the call review flagged: big-cap (no upside), sell-dominated moves,
+    drained pools, and tokens already alerted recently (any alert type)."""
+    now = int(time.time())
+    token = token.lower()
+    # 1) one alert per token per DEDUP_WINDOW, across ALL alert types
+    if not db.alert_ready("tok", token, now, cfg.DEDUP_WINDOW):
+        return False
+    # 2) buy pressure must dominate
+    if n and (buys / n) < cfg.MIN_BUY_RATIO:
+        return False
+    # 3) market-cap ceiling — established tokens have no meme upside
+    row = db.one("SELECT total_supply FROM tokens WHERE address=?", (token,))
+    last = db.one("SELECT price_weth FROM swaps WHERE pool=? AND price_weth>0 "
+                  "ORDER BY ts DESC, log_index DESC LIMIT 1", (pool,))
+    if row and last and last["price_weth"]:
+        eth = _eth_usd(idx, db)
+        mcap = last["price_weth"] * eth * (row["total_supply"] or 0)
+        if mcap > cfg.MAX_MCAP_USD:
+            return False
+    return True
+
+
+def _mark_alerted(db: Db, token: str) -> None:
+    db.mark_alert("tok", token.lower(), int(time.time()))
+
+
 def burst_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     """Per-token buy-volume bursts over a short window."""
     now = int(time.time())
@@ -48,7 +77,7 @@ def burst_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
         need = cfg.FRESH_VOL_MIN_ETH if fresh else cfg.VOL_MIN_ETH
         if r["buy_vol"] < need:
             continue
-        if not db.alert_ready("burst", token, now, cfg.ALERT_COOLDOWN):
+        if not _useful(db, idx, token, r["pool"], r["buys"], r["n"]):
             continue
         db.mark_alert("burst", token, now)
         burst = {"weth": r["vol"], "buy_weth": r["buy_vol"],
@@ -58,6 +87,7 @@ def burst_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
                                  burst, need, headline=head)
         if card:
             out.append(card)
+            _mark_alerted(db, token)
             _record(db, idx, token, "burst")
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
@@ -250,6 +280,8 @@ def surge_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
         key = f"{x['address']}:{bucket}"
         if not db.alert_ready("surge", key, now, cfg.SURGE_COOLDOWN):
             continue
+        if not _useful(db, idx, x["address"], x["pool"], x["buys"], x["swaps"]):
+            continue
         db.mark_alert("surge", key, now)
         burst = {"weth": x["vol"], "buy_weth": x["vol"],
                  "buys": x["buys"], "swaps": x["swaps"]}
@@ -258,6 +290,7 @@ def surge_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
                                  headline=f"🚀 +{x['pct']:.0f}% SURGE")
         if card:
             out.append(card)
+            _mark_alerted(db, x["address"])
             _record(db, idx, x["address"], "surge")
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
@@ -273,10 +306,15 @@ def momentum_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     for m in hot:
         if not db.alert_ready("momentum", m["address"], now, cfg.ALERT_COOLDOWN):
             continue
+        cur = m.get("cur") or {}
+        if not _useful(db, idx, m["address"], m["pool"],
+                       cur.get("buys", 0), cur.get("n", 0)):
+            continue
         db.mark_alert("momentum", m["address"], now)
         card = cards.momentum_card(rpc, db, idx, m)
         if card:
             out.append(card)
+            _mark_alerted(db, m["address"])
             _record(db, idx, m["address"], "momentum")
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
@@ -344,7 +382,7 @@ def velocity_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
         need = cfg.FRESH_VELOCITY_MIN_ETH if fresh else cfg.VELOCITY_MIN_ETH
         if r["buy_vol"] < need:
             continue
-        if not db.alert_ready("velocity", r["address"], now, cfg.VELOCITY_COOLDOWN):
+        if not _useful(db, idx, r["address"], r["pool"], r["buys"], r["n"]):
             continue
         db.mark_alert("velocity", r["address"], now)
         rate = r["buy_vol"] / (win / 60)   # Ξ per minute
@@ -356,6 +394,7 @@ def velocity_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
                                  need, headline=head)
         if card:
             out.append(card)
+            _mark_alerted(db, r["address"])
             _record(db, idx, r["address"], "velocity")
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
@@ -471,17 +510,20 @@ def stock_messages(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
 def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     if db.get_meta("global_paused", "0") == "1":
         return []
-    msgs = launch_messages(rpc, db, idx, tick.new_launches)
+    # Primary, high-signal early calls first (all pass the usefulness gate).
+    msgs = velocity_messages(rpc, db, idx)
     msgs += burst_messages(rpc, db, idx)
+    msgs += momentum_messages(rpc, db, idx)
+    msgs += surge_messages(rpc, db, idx)
+    # New launches (graded) and quotes on coins we already called.
+    msgs += launch_messages(rpc, db, idx, tick.new_launches)
+    msgs += quote_messages(rpc, db, idx)
+    # Lightweight status notes.
     msgs += graduation_messages(rpc, db, idx)
     msgs += whale_messages(rpc, db, idx, tick.new_swaps)
-    msgs += velocity_messages(rpc, db, idx)
-    msgs += migration_messages(rpc, db, idx)
-    msgs += surge_messages(rpc, db, idx)
-    msgs += momentum_messages(rpc, db, idx)
-    msgs += volume_log_messages(db, idx)
-    msgs += quote_messages(rpc, db, idx)
     msgs += stock_messages(rpc, db, idx, tick)
-    # PONS-token spike/price alerts intentionally omitted — the feed is about
-    # other launchpad tokens (launches, volume bursts, graduations), not PONS.
+    # The broad "any token with volume" feed is noise for meme traders — off by
+    # default. Migration follow-ups and PONS spike/price are also omitted.
+    if not cfg.DISABLE_VOLUME_LOG:
+        msgs += volume_log_messages(db, idx)
     return [m for m in msgs if m]
