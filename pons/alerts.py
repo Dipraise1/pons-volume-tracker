@@ -590,6 +590,51 @@ def reanalyze_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     return out
 
 
+MILESTONES = [2, 3, 5, 10, 25, 50, 100]
+
+
+def milestone_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
+    """Fire once when a coin we CALLED crosses a new multiple (2x/3x/5x/…) from
+    our entry — the 'we called this and it ran' flex."""
+    now = int(time.time())
+    eth = _eth_usd(idx, db)
+    rows = db.q(
+        "SELECT c.token, c.price_usd, t.pool, t.symbol, t.name "
+        "FROM calls c JOIN tokens t ON t.address = c.token "
+        "WHERE c.ts = (SELECT MIN(ts) FROM calls c2 WHERE c2.token = c.token) "
+        "AND c.ts >= ? AND c.price_usd > 0", (now - 7 * 86400,))
+    out = []
+    for r in rows:
+        last = db.one("SELECT price_weth, ts FROM swaps WHERE pool=? AND "
+                      "price_weth>0 ORDER BY ts DESC, log_index DESC LIMIT 1",
+                      (r["pool"],))
+        if not last or (now - last["ts"]) > 6 * 3600:   # stale price -> skip
+            continue
+        mult = (last["price_weth"] * eth) / r["price_usd"]
+        crossed = [m for m in MILESTONES if mult >= m]
+        if not crossed:
+            continue
+        top = max(crossed)
+        if not db.alert_ready("ms", f"{r['token']}:{top}", now, FOREVER):
+            continue
+        v = db.one("SELECT COALESCE(SUM(ABS(weth_amt)),0) vol, "
+                   "COALESCE(SUM(is_buy),0) buys, COUNT(*) n FROM swaps "
+                   "WHERE pool=? AND ts>=?", (r["pool"], now - 3600))
+        # mark every crossed milestone so we never re-alert a lower one later
+        for m in crossed:
+            db.mark_alert("ms", f"{r['token']}:{m}", now)
+        burst = {"weth": v["vol"], "buy_weth": v["vol"],
+                 "buys": v["buys"], "swaps": v["n"]}
+        head = f"🚀 {top}X CALL · {mult:.1f}x since we called it"
+        card = cards.volume_card(rpc, db, idx, r["token"], 3600, burst, 0.0,
+                                 headline=head)
+        if card:
+            out.append(card)
+        if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
+            break
+    return out
+
+
 def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     if db.get_meta("global_paused", "0") == "1":
         return []
@@ -602,6 +647,7 @@ def collect(rpc: Rpc, db: Db, idx: Indexer, tick) -> list[str]:
     msgs += launch_messages(rpc, db, idx, tick.new_launches)
     msgs += quote_messages(rpc, db, idx)
     msgs += reanalyze_messages(rpc, db, idx)
+    msgs += milestone_messages(rpc, db, idx)
     # Lightweight status notes.
     msgs += graduation_messages(rpc, db, idx)
     msgs += whale_messages(rpc, db, idx, tick.new_swaps)
