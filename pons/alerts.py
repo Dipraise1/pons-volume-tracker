@@ -163,19 +163,39 @@ def graduation_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
 
 
 def whale_messages(rpc, db: Db, idx: Indexer, swaps: list) -> list[str]:
+    """Consolidate all whale-sized swaps per token into ONE full detailed card
+    (with holders), rather than a scattered message per swap."""
     if not swaps:
         return []
-    now = int(time.time())
+    from collections import defaultdict
+    groups: dict[str, list] = defaultdict(list)
+    for s in swaps:
+        if s.get("token", "").lower() == C.PONS:
+            continue
+        if abs(s["weth"]) >= cfg.WHALE_ETH:
+            groups[s["token"].lower()].append(s)
     out = []
-    for s in sorted(swaps, key=lambda x: abs(x["weth"]), reverse=True):
-        if s.get("token", "").lower() == C.PONS:   # skip PONS's own swaps
+    for token in sorted(groups,
+                        key=lambda t: sum(abs(x["weth"]) for x in groups[t]),
+                        reverse=True):
+        ss = groups[token]
+        pool = ss[0]["pool"]
+        buys = [x for x in ss if x["is_buy"]]
+        # one detailed alert per token; gate on mcap / buy pressure / dedup
+        if not _useful(db, idx, token, pool, len(buys), len(ss)):
             continue
-        if abs(s["weth"]) < cfg.WHALE_ETH:
-            break
-        if not db.alert_ready("whale", s["tx"], now, FOREVER):
-            continue
-        db.mark_alert("whale", s["tx"], now)
-        out.append(cards.whale_card(db, idx, s))
+        biggest = max(ss, key=lambda x: abs(x["weth"]))
+        side = "BUY" if biggest["is_buy"] else "SELL"
+        head = f"🐋 WHALE {side} {abs(biggest['weth']):.2f}Ξ"
+        burst = {"weth": sum(abs(x["weth"]) for x in ss),
+                 "buy_weth": sum(abs(x["weth"]) for x in buys),
+                 "buys": len(buys), "swaps": len(ss)}
+        card = cards.volume_card(rpc, db, idx, token, cfg.VOL_WINDOW,
+                                 burst, cfg.WHALE_ETH, headline=head)
+        if card:
+            out.append(card)
+            _mark_alerted(db, token)
+            _record(db, idx, token, "whale")
         if len(out) >= cfg.MAX_ALERTS_PER_CYCLE:
             break
     return out
@@ -242,21 +262,35 @@ def quote_messages(rpc: Rpc, db: Db, idx: Indexer) -> list[str]:
     now = int(time.time())
     win = cfg.QUOTE_WINDOW
     rows = db.q(
-        "SELECT c.token, c.ts, c.kind, c.price_usd, c.mcap_usd, "
-        "  COALESCE(SUM(ABS(s.weth_amt)),0) vol, COUNT(s.tx) n "
+        "SELECT c.token, c.ts, c.price_usd, t.pool, "
+        "  COALESCE(SUM(ABS(s.weth_amt)),0) vol, "
+        "  COALESCE(SUM(s.is_buy),0) buys, COUNT(s.tx) n "
         "FROM calls c JOIN tokens t ON t.address = c.token "
         "LEFT JOIN swaps s ON s.pool = t.pool AND s.ts >= ? "
         "GROUP BY c.token HAVING vol >= ? "
         "ORDER BY vol DESC LIMIT ?",
         (now - win, cfg.QUOTE_MIN_ETH, cfg.MAX_ALERTS_PER_CYCLE))
     out = []
+    eth = _eth_usd(idx, db)
     for r in rows:
         if not db.alert_ready("quote", r["token"], now, cfg.QUOTE_COOLDOWN):
             continue
+        last = db.one("SELECT price_weth FROM swaps WHERE pool=? AND price_weth>0 "
+                      "ORDER BY ts DESC, log_index DESC LIMIT 1", (r["pool"],))
+        cur = (last["price_weth"] if last else 0) * eth
+        supply = (db.one("SELECT total_supply FROM tokens WHERE address=?",
+                         (r["token"],)) or {"total_supply": 0})["total_supply"]
+        if cur and supply and cur * supply > cfg.MAX_MCAP_USD:
+            continue   # grown past meme range — stop quoting
         db.mark_alert("quote", r["token"], now)
-        call_row = {"ts": r["ts"], "price_usd": r["price_usd"],
-                    "mcap_usd": r["mcap_usd"]}
-        card = cards.quote_card(rpc, db, idx, r["token"], call_row, win)
+        mult = (cur / r["price_usd"]) if r["price_usd"] else 0
+        dot = "🟢" if mult >= 1 else "🔴"
+        head = (f"📈 WE CALLED THIS · {dot} {mult:.2f}x since call"
+                if mult else "📈 WE CALLED THIS")
+        burst = {"weth": r["vol"], "buy_weth": r["vol"],
+                 "buys": r["buys"] or 0, "swaps": r["n"] or 0}
+        card = cards.volume_card(rpc, db, idx, r["token"], win, burst,
+                                 cfg.QUOTE_MIN_ETH, headline=head)
         if card:
             out.append(card)
     return out
